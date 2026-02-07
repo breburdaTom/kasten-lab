@@ -1,0 +1,27 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Profile
+metadata:
+  name: local-export-profile
+  namespace: kasten-io
+spec:
+  type: Location
+  locationSpec:
+    type: FileStore
+    fileStore:
+      # For Kind/hostpath testing, use local path
+      # In production, use S3, Azure, GCS, or NFS
+      path: /mnt/k10-backup-data
+      claimName: k10-backup-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k10-backup-pvc
+  namespace: kasten-io
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: csi-hostpath-sc
+  resources:
+    requests:
+      storage: 5Gi

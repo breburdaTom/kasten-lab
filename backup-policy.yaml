@@ -1,0 +1,24 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: postgres-backup-policy
+  namespace: kasten-io
+spec:
+  comment: "Policy to backup Postgres in test-app with export"
+  frequency: "@hourly"
+  actions:
+    - action: backup
+    - action: export
+      exportParameters:
+        frequency: "@hourly"
+        profile:
+          name: local-export-profile
+          namespace: kasten-io
+  retention:
+    hourly: 2
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - test-app

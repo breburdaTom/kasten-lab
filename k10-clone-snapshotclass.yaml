@@ -1,0 +1,9 @@
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: k10-clone-csi-hostpath-snapclass
+  labels:
+    k10.kasten.io/isCloneClass: "true"
+driver: hostpath.csi.k8s.io
+deletionPolicy: Retain
+
