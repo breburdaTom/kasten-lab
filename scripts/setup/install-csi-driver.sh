@@ -36,29 +36,24 @@ wait_for_condition() {
     return 1
 }
 
-download_csi_driver() {
-    log_info "Downloading CSI Hostpath Driver (version: ${CSI_DRIVER_VERSION})..."
-    
-    local tmp_dir="${PROJECT_ROOT}/.tmp/csi-driver-host-path"
-    rm -rf "${tmp_dir}"
-    mkdir -p "${tmp_dir}"
-    
-    # Clone only the specific version (shallow clone for speed)
-    git clone --depth 1 --branch "${CSI_DRIVER_VERSION}" "${CSI_DRIVER_REPO}" "${tmp_dir}"
-    
-    log_info "CSI Hostpath Driver downloaded to ${tmp_dir}"
-    echo "${tmp_dir}"
-}
-
 deploy_csi_driver() {
     log_info "Deploying CSI Hostpath Driver..."
     
-    local csi_dir
-    csi_dir=$(download_csi_driver)
-    local deploy_path="${csi_dir}/${CSI_DRIVER_DEPLOY_PATH}"
+    local tmp_dir="${PROJECT_ROOT}/.tmp/csi-driver-host-path"
+    local deploy_path="${tmp_dir}/${CSI_DRIVER_DEPLOY_PATH}"
     
+    # Download CSI driver
+    log_info "Downloading CSI Hostpath Driver (version: ${CSI_DRIVER_VERSION})..."
+    rm -rf "${tmp_dir}"
+    mkdir -p "${tmp_dir}"
+    git clone --depth 1 --branch "${CSI_DRIVER_VERSION}" "${CSI_DRIVER_REPO}" "${tmp_dir}"
+    log_info "CSI Hostpath Driver downloaded to ${tmp_dir}"
+    
+    # Verify deploy path exists
     if [[ ! -d "${deploy_path}" ]]; then
         log_error "Deploy path not found: ${deploy_path}"
+        log_error "Available directories:"
+        ls -la "${tmp_dir}/deploy/" 2>/dev/null || true
         exit 1
     fi
     
@@ -67,7 +62,7 @@ deploy_csi_driver() {
     
     # Cleanup
     log_info "Cleaning up temporary files..."
-    rm -rf "${PROJECT_ROOT}/.tmp/csi-driver-host-path"
+    rm -rf "${tmp_dir}"
     
     log_info "CSI Hostpath Driver deployed"
 }
