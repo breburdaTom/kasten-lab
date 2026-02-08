@@ -6,9 +6,6 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
 K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 POLICY_NAME="${POLICY_NAME:-postgres-backup-policy}"
@@ -22,7 +19,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2
 
 trigger_backup() {
     local run_action_name="manual-backup-$(date +%Y%m%d%H%M%S)"
-    log_info "Triggering backup with RunAction: ${run_action_name}"
+    log_info "Creating RunAction: ${run_action_name}"
     
     cat <<EOF | kubectl apply -f -
 apiVersion: actions.kio.kasten.io/v1alpha1
@@ -36,77 +33,68 @@ spec:
     name: ${POLICY_NAME}
     namespace: ${K10_NAMESPACE}
 EOF
-    
-    log_info "RunAction created: ${run_action_name}"
     echo "${run_action_name}"
 }
 
 wait_for_backup() {
-    local run_action_name="$1" elapsed=0 interval=10
-    log_info "Waiting for backup to complete (timeout: ${BACKUP_TIMEOUT}s)..."
+    local run_action_name="$1" elapsed=0 interval=15
+    log_info "Waiting for backup (timeout: ${BACKUP_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $BACKUP_TIMEOUT ]]; do
-        local backup_action state
-        backup_action=$(kubectl get backupactions -n "${K10_NAMESPACE}" \
-            -l "k10.kasten.io/policyName=${POLICY_NAME}" \
-            --sort-by=.metadata.creationTimestamp \
-            -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
+        # Get RunAction and BackupAction states
+        local run_state ba_name ba_state
+        run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
+        ba_name=$(kubectl get backupactions -n "${K10_NAMESPACE}" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
         
-        if [[ -n "${backup_action}" ]]; then
-            state=$(kubectl get backupaction "${backup_action}" -n "${K10_NAMESPACE}" \
-                -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            log_info "BackupAction: ${backup_action}, State: ${state}"
+        if [[ -n "$ba_name" ]]; then
+            ba_state=$(kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+            log_info "RunAction: ${run_state} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s/${BACKUP_TIMEOUT}s"
             
-            case "${state}" in
-                "Complete") log_info "Backup completed successfully!"; return 0 ;;
-                "Failed")
-                    log_error "Backup failed: $(kubectl get backupaction "${backup_action}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.error}' 2>/dev/null)"
-                    return 1 ;;
-            esac
+            [[ "$ba_state" == "Complete" ]] && { log_info "Backup completed!"; return 0; }
+            [[ "$ba_state" == "Failed" ]] && { log_error "Backup failed!"; kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o yaml; return 1; }
+        else
+            log_info "RunAction: ${run_state} | Waiting for BackupAction... | ${elapsed}s/${BACKUP_TIMEOUT}s"
         fi
+        
+        [[ "$run_state" == "Failed" ]] && { log_error "RunAction failed!"; kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml; return 1; }
         
         sleep "$interval"
         elapsed=$((elapsed + interval))
-        log_info "Waiting for backup... (${elapsed}s/${BACKUP_TIMEOUT}s)"
     done
     
-    log_error "Timeout waiting for backup to complete"
+    log_error "Timeout! RunActions/BackupActions:"
+    kubectl get runactions,backupactions -n "${K10_NAMESPACE}" 2>/dev/null || true
     return 1
 }
 
 verify_restore_point() {
-    log_info "Verifying RestorePoint was created..."
-    sleep 10
+    log_info "Checking RestorePoints..."
+    sleep 5
     
-    local restore_point
-    restore_point=$(kubectl get restorepoints -n "${APP_NAMESPACE}" \
-        --sort-by=.metadata.creationTimestamp \
-        -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
+    local rp_name
+    rp_name=$(kubectl get restorepoints -n "${APP_NAMESPACE}" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
     
-    if [[ -z "${restore_point}" ]]; then
-        log_error "No RestorePoints found for namespace ${APP_NAMESPACE}"
-        return 1
+    if [[ -n "$rp_name" ]]; then
+        local rp_state
+        rp_state=$(kubectl get restorepoint "$rp_name" -n "${APP_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+        log_info "RestorePoint: ${rp_name} (${rp_state})"
+    else
+        log_warn "No RestorePoints found yet in ${APP_NAMESPACE}"
+        kubectl get restorepoints --all-namespaces 2>/dev/null || true
     fi
-    
-    log_info "RestorePoint created: ${restore_point}"
-    kubectl get restorepoints -n "${APP_NAMESPACE}"
-    
-    local rp_status
-    rp_status=$(kubectl get restorepoint "${restore_point}" -n "${APP_NAMESPACE}" \
-        -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-    log_info "RestorePoint status: ${rp_status}"
-    
-    [[ "${rp_status}" != "Available" ]] && log_warn "RestorePoint not yet Available, current state: ${rp_status}"
-    return 0
 }
 
 main() {
-    log_info "Starting backup trigger..."
+    log_info "Starting backup..."
+    
+    # Verify policy exists
+    kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" &>/dev/null || { log_error "Policy ${POLICY_NAME} not found"; exit 1; }
+    
     local run_action_name
     run_action_name=$(trigger_backup)
     wait_for_backup "${run_action_name}"
     verify_restore_point
-    log_info "Backup trigger completed successfully!"
+    log_info "Backup completed successfully!"
 }
 
 main "$@"
