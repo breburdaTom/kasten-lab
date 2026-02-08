@@ -78,7 +78,7 @@ verify_installation() {
     # Wait for controller pods to be ready
     wait_for_condition \
         "kubectl get pods -n kube-system -l app=snapshot-controller --no-headers 2>/dev/null | grep -q Running" \
-        120 \
+        300 \
         5 \
         "snapshot-controller pods"
     
