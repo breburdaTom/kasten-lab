@@ -11,7 +11,7 @@ APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 POLICY_NAME="${POLICY_NAME:-postgres-backup-policy}"
 TIMEOUT="${BACKUP_TIMEOUT:-600}"
 
-echo "[INFO] Triggering backup..."
+eecho "[INFO] Triggering backup for policy '${POLICY_NAME}'..."
 
 # Create RunAction
 RUN_ACTION="manual-backup-$(date +%Y%m%d%H%M%S)"
@@ -28,6 +28,7 @@ spec:
     namespace: ${K10_NAMESPACE}
 EOF
 
+echo "[INFO] RunAction '${RUN_ACTION}' created"
 echo "[INFO] Waiting for backup to complete (timeout: ${TIMEOUT}s)..."
 
 # Wait for backup
@@ -37,27 +38,36 @@ while [[ $elapsed -lt $TIMEOUT ]]; do
     run_state=$(kubectl get runaction "${RUN_ACTION}" -n "${K10_NAMESPACE}" \
         -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
     
-    # Get BackupAction info
-    ba_state=$(kubectl get backupactions -l "k10.kasten.io/runActionName=${RUN_ACTION}" \
-        --all-namespaces -o jsonpath='{.items[0].status.state}' 2>/dev/null || echo "")
+    # Get BackupAction info (search all namespaces with the runActionName label)
+    ba_info=$(kubectl get backupactions.actions.kio.kasten.io \
+        -l "k10.kasten.io/runActionName=${RUN_ACTION}" \
+        --all-namespaces \
+        -o jsonpath='{.items[0].metadata.name},{.items[0].status.state},{.items[0].status.progress}' 2>/dev/null || echo "")
     
-    echo "[INFO] RunAction: ${run_state} | BackupAction: ${ba_state:-waiting} | ${elapsed}s"
-    
-    if [[ "$ba_state" == "Complete" ]]; then
-        echo "[INFO] Backup completed successfully!"
-        exit 0
-    fi
-    
-    if [[ "$ba_state" == "Failed" ]]; then
-        echo "[ERROR] Backup failed!"
-        kubectl get backupactions -l "k10.kasten.io/runActionName=${RUN_ACTION}" \
-            --all-namespaces -o yaml
-        exit 1
+    if [[ -n "$ba_info" && "$ba_info" != ",," ]]; then
+        IFS=',' read -r ba_name ba_state ba_progress <<< "$ba_info"
+        echo "[INFO] RunAction: ${run_state} | BackupAction: ${ba_name} (${ba_state:-pending}, ${ba_progress:-0}%) | ${elapsed}s"
+        
+        if [[ "$ba_state" == "Complete" ]]; then
+            echo "[INFO] Backup completed successfully!"
+            exit 0
+        fi
+        
+        if [[ "$ba_state" == "Failed" ]]; then
+            echo "[ERROR] Backup failed!"
+            kubectl get backupactions.actions.kio.kasten.io \
+                -l "k10.kasten.io/runActionName=${RUN_ACTION}" \
+                --all-namespaces -o yaml
+            exit 1
+        fi
+    else
+        echo "[INFO] RunAction: ${run_state} | BackupAction: waiting... | ${elapsed}s"
     fi
     
     sleep 15
     elapsed=$((elapsed + 15))
 done
 
-echo "[ERROR] Backup timed out!"
+echo "[ERROR] Backup timed out after ${TIMEOUT}s!"
+kubectl get runaction "${RUN_ACTION}" -n "${K10_NAMESPACE}" -o yaml
 exit 1

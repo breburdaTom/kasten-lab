@@ -42,19 +42,29 @@ class TestBackupPolicy:
         # Verify policy targets the correct namespace
         spec = policy.get("spec", {})
         selector = spec.get("selector", {})
+        
+        # Check matchLabels (preferred) or matchExpressions
+        match_labels = selector.get("matchLabels", {})
         match_expressions = selector.get("matchExpressions", [])
         
-        # Find the namespace selector
-        namespace_values = []
-        for expr in match_expressions:
-            if expr.get("key") == "k10.kasten.io/appNamespace":
-                namespace_values = expr.get("values", [])
-                break
+        target_namespace = None
         
-        assert app_namespace in namespace_values, \
-            f"Policy should target namespace '{app_namespace}'"
+        # Check matchLabels first
+        if "k10.kasten.io/appNamespace" in match_labels:
+            target_namespace = match_labels["k10.kasten.io/appNamespace"]
+        else:
+            # Fall back to matchExpressions
+            for expr in match_expressions:
+                if expr.get("key") == "k10.kasten.io/appNamespace":
+                    values = expr.get("values", [])
+                    if values:
+                        target_namespace = values[0]
+                    break
         
-        logger.info(f"Policy targets namespace: {namespace_values}")
+        assert target_namespace == app_namespace, \
+            f"Policy should target namespace '{app_namespace}', but targets '{target_namespace}'"
+        
+        logger.info(f"Policy targets namespace: {target_namespace}")
     
     def test_policy_has_backup_action(
         self, 

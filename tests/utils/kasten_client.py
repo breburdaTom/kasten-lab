@@ -91,6 +91,7 @@ class KastenClient:
     ) -> List[Dict[str, Any]]:
         """
         Get backup actions, optionally filtered by policy.
+        BackupActions are created in the application namespace, not kasten-io.
         
         Args:
             policy_name: Filter by policy name (optional)
@@ -100,10 +101,10 @@ class KastenClient:
             if policy_name:
                 label_selector = f"k10.kasten.io/policyName={policy_name}"
             
-            result = self.custom_objects.list_namespaced_custom_object(
+            # Search all namespaces since BackupActions are in app namespace
+            result = self.custom_objects.list_cluster_custom_object(
                 group=self.ACTIONS_GROUP,
                 version=self.API_VERSION,
-                namespace=self.k10_namespace,
                 plural="backupactions",
                 label_selector=label_selector
             )
