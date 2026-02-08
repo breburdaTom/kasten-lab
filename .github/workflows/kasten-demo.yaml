@@ -1,0 +1,519 @@
+name: Kasten K10 Backup/Restore Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      k10_version:
+        description: 'Kasten K10 Helm chart version (leave empty for latest)'
+        required: false
+        default: ''
+      cleanup_on_failure:
+        description: 'Cleanup cluster on failure'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+env:
+  # Tool versions
+  KIND_VERSION: "v0.23.0"
+  KUBECTL_VERSION: "v1.30.0"
+  HELM_VERSION: "v3.15.0"
+  
+  # Kubernetes namespaces
+  K10_NAMESPACE: "kasten-io"
+  APP_NAMESPACE: "test-app"
+  
+  # Timeouts (in seconds)
+  KASTEN_READY_TIMEOUT: "600"
+  BACKUP_TIMEOUT: "600"
+  RESTORE_TIMEOUT: "300"
+
+jobs:
+  # ===========================================================================
+  # JOB 1: Setup Kind Cluster with CSI Driver
+  # ===========================================================================
+  setup-cluster:
+    name: "🏗️ Setup Kind Cluster"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
+      
+      - name: Install Helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-${{ env.HELM_VERSION }}-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version
+      
+      - name: Create Kind cluster
+        run: |
+          chmod +x scripts/setup/install-kind.sh
+          ./scripts/setup/install-kind.sh
+      
+      - name: Install Snapshot Controller
+        run: |
+          chmod +x scripts/setup/install-snapshot-controller.sh
+          ./scripts/setup/install-snapshot-controller.sh
+      
+      - name: Install CSI Hostpath Driver
+        run: |
+          chmod +x scripts/setup/install-csi-driver.sh
+          ./scripts/setup/install-csi-driver.sh
+      
+      - name: Verify cluster setup
+        run: |
+          kubectl get nodes
+          kubectl get pods -A
+          kubectl get storageclass
+          kubectl get volumesnapshotclass
+      
+      - name: Save kubeconfig
+        run: |
+          mkdir -p /tmp/artifacts
+          kind get kubeconfig --name kasten-demo > /tmp/artifacts/kubeconfig
+      
+      - name: Upload kubeconfig artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts/kubeconfig
+          retention-days: 1
+
+  # ===========================================================================
+  # JOB 2: Install Kasten K10
+  # ===========================================================================
+  install-kasten:
+    name: "📦 Install Kasten K10"
+    runs-on: ubuntu-latest
+    needs: setup-cluster
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+      
+      - name: Install Helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-${{ env.HELM_VERSION }}-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+      
+      - name: Install Kind (for cluster access)
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts
+      
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cp /tmp/artifacts/kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
+      
+      - name: Install Kasten K10
+        run: |
+          chmod +x scripts/setup/install-kasten.sh
+          ./scripts/setup/install-kasten.sh
+        env:
+          K10_VERSION: ${{ github.event.inputs.k10_version }}
+      
+      - name: Run Kasten health tests
+        run: |
+          pip install -r requirements.txt
+          pytest tests/test_01_cluster_health.py tests/test_02_kasten_health.py -v --tb=short
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-kasten-install
+          path: reports/
+          retention-days: 7
+
+  # ===========================================================================
+  # JOB 3: Deploy Test Application
+  # ===========================================================================
+  deploy-application:
+    name: "🐘 Deploy PostgreSQL"
+    runs-on: ubuntu-latest
+    needs: install-kasten
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+      
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts
+      
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cp /tmp/artifacts/kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+      
+      - name: Deploy PostgreSQL
+        run: |
+          chmod +x scripts/deploy/deploy-postgres.sh
+          ./scripts/deploy/deploy-postgres.sh
+      
+      - name: Seed test data
+        run: |
+          chmod +x scripts/deploy/seed-data.sh
+          ./scripts/deploy/seed-data.sh
+      
+      - name: Save original checksum
+        run: |
+          mkdir -p /tmp/artifacts
+          cp /tmp/original_checksum.txt /tmp/artifacts/
+      
+      - name: Run application deployment tests
+        run: |
+          pip install -r requirements.txt
+          pytest tests/test_03_app_deployment.py -v --tb=short
+      
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: original-checksum
+          path: /tmp/artifacts/original_checksum.txt
+          retention-days: 1
+
+  # ===========================================================================
+  # JOB 4: Create Backup
+  # ===========================================================================
+  create-backup:
+    name: "💾 Create Backup"
+    runs-on: ubuntu-latest
+    needs: deploy-application
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+      
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts
+      
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cp /tmp/artifacts/kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+      
+      - name: Create backup policy
+        run: |
+          chmod +x scripts/backup/create-policy.sh
+          ./scripts/backup/create-policy.sh
+      
+      - name: Trigger backup
+        run: |
+          chmod +x scripts/backup/trigger-backup.sh
+          ./scripts/backup/trigger-backup.sh
+      
+      - name: Run backup verification tests
+        run: |
+          pip install -r requirements.txt
+          pytest tests/test_04_backup_verification.py -v --tb=short
+      
+      - name: Save restore point name
+        run: |
+          mkdir -p /tmp/artifacts
+          kubectl get restorepoints -n ${{ env.APP_NAMESPACE }} -o jsonpath='{.items[0].metadata.name}' > /tmp/artifacts/restore_point_name.txt
+          cat /tmp/artifacts/restore_point_name.txt
+      
+      - name: Upload restore point artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-point
+          path: /tmp/artifacts/restore_point_name.txt
+          retention-days: 1
+
+  # ===========================================================================
+  # JOB 5: Destroy Application
+  # ===========================================================================
+  destroy-application:
+    name: "💥 Destroy Application"
+    runs-on: ubuntu-latest
+    needs: create-backup
+    timeout-minutes: 5
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+      
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts
+      
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cp /tmp/artifacts/kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+      
+      - name: Destroy application
+        run: |
+          chmod +x scripts/restore/destroy-app.sh
+          ./scripts/restore/destroy-app.sh
+      
+      - name: Verify application destroyed
+        run: |
+          echo "Verifying StatefulSet is deleted..."
+          if kubectl get statefulset pg-database -n ${{ env.APP_NAMESPACE }} 2>/dev/null; then
+            echo "ERROR: StatefulSet still exists!"
+            exit 1
+          fi
+          echo "StatefulSet successfully deleted"
+          
+          echo "Verifying PVCs are deleted..."
+          PVC_COUNT=$(kubectl get pvc -n ${{ env.APP_NAMESPACE }} --no-headers 2>/dev/null | wc -l)
+          if [ "$PVC_COUNT" -gt 0 ]; then
+            echo "ERROR: PVCs still exist!"
+            exit 1
+          fi
+          echo "PVCs successfully deleted"
+
+  # ===========================================================================
+  # JOB 6: Restore Application
+  # ===========================================================================
+  restore-application:
+    name: "🔄 Restore Application"
+    runs-on: ubuntu-latest
+    needs: destroy-application
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+      
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts
+      
+      - name: Download restore point name
+        uses: actions/download-artifact@v4
+        with:
+          name: restore-point
+          path: /tmp/artifacts
+      
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cp /tmp/artifacts/kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+      
+      - name: Restore application
+        run: |
+          chmod +x scripts/restore/restore-app.sh
+          RESTORE_POINT=$(cat /tmp/artifacts/restore_point_name.txt)
+          ./scripts/restore/restore-app.sh "$RESTORE_POINT"
+
+  # ===========================================================================
+  # JOB 7: Verify Restore & Data Integrity
+  # ===========================================================================
+  verify-restore:
+    name: "✅ Verify Restore"
+    runs-on: ubuntu-latest
+    needs: restore-application
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+      
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: /tmp/artifacts
+      
+      - name: Download original checksum
+        uses: actions/download-artifact@v4
+        with:
+          name: original-checksum
+          path: /tmp/artifacts
+      
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          cp /tmp/artifacts/kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+          cp /tmp/artifacts/original_checksum.txt /tmp/original_checksum.txt
+      
+      - name: Install test dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Run restore verification tests
+        run: |
+          pytest tests/test_05_restore_verification.py -v --tb=short --html=reports/restore_test_report.html
+      
+      - name: Upload final test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-final
+          path: reports/
+          retention-days: 30
+      
+      - name: Print success message
+        run: |
+          echo "=============================================="
+          echo "🎉 KASTEN K10 DEMO COMPLETED SUCCESSFULLY! 🎉"
+          echo "=============================================="
+          echo ""
+          echo "Summary:"
+          echo "  ✅ Kind cluster created"
+          echo "  ✅ CSI driver installed"
+          echo "  ✅ Kasten K10 installed"
+          echo "  ✅ PostgreSQL deployed"
+          echo "  ✅ Test data seeded"
+          echo "  ✅ Backup created"
+          echo "  ✅ Application destroyed"
+          echo "  ✅ Application restored"
+          echo "  ✅ Data integrity verified"
+          echo ""
+          echo "=============================================="
+
+  # ===========================================================================
+  # JOB 8: Cleanup (Always runs)
+  # ===========================================================================
+  cleanup:
+    name: "🧹 Cleanup"
+    runs-on: ubuntu-latest
+    needs: [verify-restore]
+    if: always()
+    timeout-minutes: 5
+    
+    steps:
+      - name: Install Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      
+      - name: Delete Kind cluster
+        run: |
+          if kind get clusters | grep -q kasten-demo; then
+            echo "Deleting Kind cluster..."
+            kind delete cluster --name kasten-demo
+            echo "Cluster deleted successfully"
+          else
+            echo "No cluster to delete"
+          fi

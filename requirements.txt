@@ -1,0 +1,17 @@
+# Kasten K10 Demo - Python Test Dependencies
+# ============================================
+
+# Kubernetes client library
+kubernetes>=28.1.0
+
+# Testing framework
+pytest>=7.4.0
+pytest-html>=4.1.0
+pytest-timeout>=2.2.0
+
+# Utilities
+pyyaml>=6.0.1
+requests>=2.31.0
+
+# Database connectivity (for direct PostgreSQL verification)
+psycopg2-binary>=2.9.9

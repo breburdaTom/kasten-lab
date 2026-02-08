@@ -1,0 +1,15 @@
+# VolumeSnapshotClass for Kasten K10
+# This enables Kasten to create volume snapshots using the CSI hostpath driver
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: csi-hostpath-snapclass
+  annotations:
+    # Mark this as the default snapshot class for Kasten
+    k10.kasten.io/is-snapshot-class: "true"
+  labels:
+    # Additional label for Kasten clone operations
+    k10.kasten.io/isCloneClass: "true"
+driver: hostpath.csi.k8s.io
+deletionPolicy: Delete
