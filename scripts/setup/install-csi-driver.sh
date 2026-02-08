@@ -9,7 +9,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-CSI_DRIVER_PATH="${PROJECT_ROOT}/csi-driver-host-path/deploy/kubernetes-latest"
+# CSI Driver configuration - download from official repo
+CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-v1.15.0}"
+CSI_DRIVER_REPO="https://github.com/kubernetes-csi/csi-driver-host-path"
+CSI_DRIVER_DEPLOY_PATH="deploy/kubernetes-latest"
 STORAGE_CLASS_NAME="csi-hostpath-sc"
 
 # Colors and logging
@@ -33,16 +36,39 @@ wait_for_condition() {
     return 1
 }
 
+download_csi_driver() {
+    log_info "Downloading CSI Hostpath Driver (version: ${CSI_DRIVER_VERSION})..."
+    
+    local tmp_dir="${PROJECT_ROOT}/.tmp/csi-driver-host-path"
+    rm -rf "${tmp_dir}"
+    mkdir -p "${tmp_dir}"
+    
+    # Clone only the specific version (shallow clone for speed)
+    git clone --depth 1 --branch "${CSI_DRIVER_VERSION}" "${CSI_DRIVER_REPO}" "${tmp_dir}"
+    
+    log_info "CSI Hostpath Driver downloaded to ${tmp_dir}"
+    echo "${tmp_dir}"
+}
+
 deploy_csi_driver() {
     log_info "Deploying CSI Hostpath Driver..."
     
-    if [[ ! -d "${CSI_DRIVER_PATH}" ]]; then
-        log_error "CSI driver path not found: ${CSI_DRIVER_PATH}"
+    local csi_dir
+    csi_dir=$(download_csi_driver)
+    local deploy_path="${csi_dir}/${CSI_DRIVER_DEPLOY_PATH}"
+    
+    if [[ ! -d "${deploy_path}" ]]; then
+        log_error "Deploy path not found: ${deploy_path}"
         exit 1
     fi
     
-    log_info "Using local CSI driver from: ${CSI_DRIVER_PATH}"
-    (cd "${CSI_DRIVER_PATH}" && ./deploy.sh)
+    log_info "Running deploy script from: ${deploy_path}"
+    (cd "${deploy_path}" && ./deploy.sh)
+    
+    # Cleanup
+    log_info "Cleaning up temporary files..."
+    rm -rf "${PROJECT_ROOT}/.tmp/csi-driver-host-path"
+    
     log_info "CSI Hostpath Driver deployed"
 }
 

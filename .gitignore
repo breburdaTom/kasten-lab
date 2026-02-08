@@ -43,6 +43,7 @@ reports/*.json
 *.tmp
 *.temp
 /tmp/
+.tmp/
 .cache/
 .pytest_cache/
 
