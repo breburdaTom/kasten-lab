@@ -41,10 +41,12 @@ wait_for_backup() {
     log_info "Waiting for backup (timeout: ${BACKUP_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $BACKUP_TIMEOUT ]]; do
-        # Get RunAction state and details
-        local run_state run_error
-        run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-        run_error=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.error}' 2>/dev/null || echo "")
+        # Get RunAction full status
+        local run_yaml
+        run_yaml=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || echo "")
+        
+        local run_state
+        run_state=$(echo "$run_yaml" | grep "state:" | head -1 | awk '{print $2}' || echo "")
         
         # Get BackupAction
         local ba_name ba_state
@@ -52,23 +54,28 @@ wait_for_backup() {
         
         if [[ -n "$ba_name" ]]; then
             ba_state=$(kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            log_info "RunAction: ${run_state:-Creating} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s"
+            log_info "RunAction: ${run_state:-Pending} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s"
             
             [[ "$ba_state" == "Complete" ]] && { log_info "Backup completed!"; return 0; }
             [[ "$ba_state" == "Failed" ]] && { log_error "Backup failed!"; kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o yaml; return 1; }
         else
-            log_info "RunAction: ${run_state:-Creating} | No BackupAction yet | ${elapsed}s"
-            # Show RunAction details if stuck
-            if [[ $elapsed -ge 60 && -z "$ba_name" ]]; then
-                log_warn "RunAction stuck, showing details:"
-                kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null | grep -A20 "status:" || true
-            fi
+            log_info "RunAction: ${run_state:-Pending} | No BackupAction yet | ${elapsed}s"
+        fi
+        
+        # Show debug info every 60 seconds if no BackupAction
+        if [[ $((elapsed % 60)) -eq 0 && $elapsed -gt 0 && -z "$ba_name" ]]; then
+            log_warn "=== Debug: RunAction status ==="
+            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
+            log_warn "=== Debug: Policy status ==="
+            kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null | grep -A10 "status:" || true
+            log_warn "=== Debug: K10 apps in ${APP_NAMESPACE} ==="
+            kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || echo "No K10 applications found"
         fi
         
         # Check for failures
-        if [[ "$run_state" == "Failed" || -n "$run_error" ]]; then
-            log_error "RunAction failed: ${run_error}"
-            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml
+        if echo "$run_yaml" | grep -q "state: Failed"; then
+            log_error "RunAction failed!"
+            echo "$run_yaml"
             return 1
         fi
         
@@ -101,8 +108,17 @@ verify_restore_point() {
 main() {
     log_info "Starting backup..."
     
-    # Verify policy exists
-    kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" &>/dev/null || { log_error "Policy ${POLICY_NAME} not found"; exit 1; }
+    # Verify policy exists and show its status
+    log_info "Checking policy ${POLICY_NAME}..."
+    if ! kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" &>/dev/null; then
+        log_error "Policy ${POLICY_NAME} not found"
+        exit 1
+    fi
+    kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o wide
+    
+    # Check if K10 discovered the application
+    log_info "Checking K10 application discovery for ${APP_NAMESPACE}..."
+    kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || log_warn "No K10 applications discovered in ${APP_NAMESPACE}"
     
     local run_action_name
     run_action_name=$(trigger_backup)
