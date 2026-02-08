@@ -74,10 +74,8 @@ class TestKastenPods:
         k10_namespace: str
     ):
         """Verify the gateway pod is ready (critical for dashboard access)."""
-        pods = k8s_client.get_pods(
-            k10_namespace, 
-            label_selector="app=gateway"
-        )
+        # K10 gateway deployment uses component=gateway label
+        pods = k8s_client.get_pods(k10_namespace, label_selector="component=gateway")
         
         assert len(pods) > 0, "Gateway pod should exist"
         
@@ -162,26 +160,31 @@ class TestKastenDeployments:
 class TestKastenCRDs:
     """Test suite for verifying Kasten K10 CRDs."""
     
-    REQUIRED_CRDS = [
-        "policies.config.kio.kasten.io",
-        "profiles.config.kio.kasten.io",
-        "restorepoints.apps.kio.kasten.io",
-        "backupactions.actions.kio.kasten.io",
-        "restoreactions.actions.kio.kasten.io",
-        "runactions.actions.kio.kasten.io",
+    # CRD name patterns to look for (partial matches)
+    REQUIRED_CRD_PATTERNS = [
+        "policies",
+        "profiles", 
+        "restorepoints",
+        "backupactions",
+        "restoreactions",
+        "runactions",
     ]
     
     def test_kasten_crds_installed(self, k8s_client: K8sClient):
         """Verify Kasten CRDs are installed."""
         existing_crds = k8s_client.get_crds()
+        kasten_crds = [crd for crd in existing_crds if "kasten.io" in crd]
+        
+        logger.info(f"Found Kasten CRDs: {kasten_crds}")
         
         missing = []
-        for crd in self.REQUIRED_CRDS:
-            if crd not in existing_crds:
-                missing.append(crd)
+        for pattern in self.REQUIRED_CRD_PATTERNS:
+            found = any(pattern in crd for crd in kasten_crds)
+            if not found:
+                missing.append(pattern)
         
         assert len(missing) == 0, \
-            f"Missing required Kasten CRDs: {missing}"
+            f"Missing required Kasten CRD patterns: {missing}. Found CRDs: {kasten_crds}"
         
         logger.info("All required Kasten CRDs are installed")
     

@@ -132,9 +132,10 @@ class TestSnapshotController:
     
     def test_snapshot_controller_running(self, k8s_client: K8sClient):
         """Verify snapshot controller is running."""
+        # external-snapshotter v8.x uses this label
         pods = k8s_client.get_pods(
-            "kube-system",
-            label_selector="app=snapshot-controller"
+            "kube-system", 
+            label_selector="app.kubernetes.io/name=snapshot-controller"
         )
         
         assert len(pods) > 0, "Snapshot controller pods should exist"
