@@ -39,15 +39,9 @@ spec:
   frequency: "@onDemand"
   actions:
     - action: backup
-      backupParameters:
-        filters:
-          includeClusterResources: []
   selector:
-    matchExpressions:
-      - key: k10.kasten.io/appNamespace
-        operator: In
-        values:
-          - ${APP_NAMESPACE}
+    matchNamespaces:
+      - ${APP_NAMESPACE}
 EOF
     log_info "Backup policy created"
 }

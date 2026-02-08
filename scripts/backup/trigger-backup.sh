@@ -41,29 +41,43 @@ wait_for_backup() {
     log_info "Waiting for backup (timeout: ${BACKUP_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $BACKUP_TIMEOUT ]]; do
-        # Get RunAction and BackupAction states
-        local run_state ba_name ba_state
-        run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
+        # Get RunAction state and details
+        local run_state run_error
+        run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+        run_error=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.error}' 2>/dev/null || echo "")
+        
+        # Get BackupAction
+        local ba_name ba_state
         ba_name=$(kubectl get backupactions -n "${K10_NAMESPACE}" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
         
         if [[ -n "$ba_name" ]]; then
             ba_state=$(kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            log_info "RunAction: ${run_state} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s/${BACKUP_TIMEOUT}s"
+            log_info "RunAction: ${run_state:-Creating} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s"
             
             [[ "$ba_state" == "Complete" ]] && { log_info "Backup completed!"; return 0; }
             [[ "$ba_state" == "Failed" ]] && { log_error "Backup failed!"; kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o yaml; return 1; }
         else
-            log_info "RunAction: ${run_state} | Waiting for BackupAction... | ${elapsed}s/${BACKUP_TIMEOUT}s"
+            log_info "RunAction: ${run_state:-Creating} | No BackupAction yet | ${elapsed}s"
+            # Show RunAction details if stuck
+            if [[ $elapsed -ge 60 && -z "$ba_name" ]]; then
+                log_warn "RunAction stuck, showing details:"
+                kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null | grep -A20 "status:" || true
+            fi
         fi
         
-        [[ "$run_state" == "Failed" ]] && { log_error "RunAction failed!"; kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml; return 1; }
+        # Check for failures
+        if [[ "$run_state" == "Failed" || -n "$run_error" ]]; then
+            log_error "RunAction failed: ${run_error}"
+            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml
+            return 1
+        fi
         
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
     
-    log_error "Timeout! RunActions/BackupActions:"
-    kubectl get runactions,backupactions -n "${K10_NAMESPACE}" 2>/dev/null || true
+    log_error "Timeout! Final state:"
+    kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
     return 1
 }
 
