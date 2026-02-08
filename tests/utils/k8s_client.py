@@ -79,6 +79,9 @@ class K8sClient:
         label_selector: Optional[str] = None
     ) -> List[client.V1Pod]:
         """Get pods in a namespace, optionally filtered by label."""
+        if not namespace or not namespace.strip():
+            raise ValueError("namespace parameter cannot be empty")
+        
         if label_selector:
             return self.core_v1.list_namespaced_pod(
                 namespace, label_selector=label_selector

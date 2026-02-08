@@ -66,7 +66,16 @@ save_checksum() {
     checksum=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- psql -U postgres -d testdb -t -A -c \
         "SELECT md5(string_agg(checksum, '' ORDER BY id)) FROM test_data;" | tr -d '[:space:]')
     
-    echo "${checksum}" > "${CHECKSUM_FILE}"
+    if [[ -z "${checksum}" ]]; then
+        log_error "Failed to calculate checksum - empty result"
+        exit 1
+    fi
+    
+    local checksum_dir
+    checksum_dir=$(dirname "${CHECKSUM_FILE}")
+    mkdir -p "${checksum_dir}" || { log_error "Failed to create directory: ${checksum_dir}"; exit 1; }
+    
+    echo "${checksum}" > "${CHECKSUM_FILE}" || { log_error "Failed to write checksum file: ${CHECKSUM_FILE}"; exit 1; }
     log_info "Aggregate checksum saved to: ${CHECKSUM_FILE}"
     log_info "Checksum value: ${checksum}"
 }

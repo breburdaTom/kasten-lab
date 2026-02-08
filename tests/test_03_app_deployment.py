@@ -141,14 +141,18 @@ class TestPostgresConnectivity:
     
     def test_postgres_accepting_connections(self, app_namespace: str):
         """Verify PostgreSQL is accepting connections."""
-        result = subprocess.run(
-            [
-                "kubectl", "exec", "-n", app_namespace, "pg-database-0", "--",
-                "pg_isready", "-U", "postgres"
-            ],
-            capture_output=True,
-            text=True
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "kubectl", "exec", "-n", app_namespace, "pg-database-0", "--",
+                    "pg_isready", "-U", "postgres"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("kubectl command timed out after 60 seconds")
         
         assert result.returncode == 0, \
             f"PostgreSQL should be accepting connections: {result.stderr}"

@@ -121,9 +121,12 @@ class KastenClient:
         if not actions:
             return None
         
-        # Sort by creation timestamp
+        # Sort by creation timestamp, then by name for deterministic ordering
         actions.sort(
-            key=lambda x: x["metadata"].get("creationTimestamp", ""),
+            key=lambda x: (
+                x["metadata"].get("creationTimestamp", ""),
+                x["metadata"].get("name", "")
+            ),
             reverse=True
         )
         return actions[0]
