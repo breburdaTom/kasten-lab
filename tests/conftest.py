@@ -70,8 +70,9 @@ def app_namespace() -> str:
 @pytest.fixture
 def wait_for_condition(k8s_client: K8sClient) -> WaitFunc:
     """Factory fixture for waiting on conditions."""
-    return lambda cond, timeout=300, interval=10, desc="condition": \
-        k8s_client.wait_for_condition(cond, timeout, interval, desc)
+    def _wait(condition, timeout=300, interval=10, description="condition"):
+        return k8s_client.wait_for_condition(condition, timeout, interval, description)
+    return _wait
 
 
 @pytest.fixture
