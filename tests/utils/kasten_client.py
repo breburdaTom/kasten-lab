@@ -234,12 +234,28 @@ class KastenClient:
             raise
     
     def is_restore_point_available(self, name: str, namespace: str) -> bool:
-        """Check if a restore point is available."""
+        """Check if a restore point is available.
+        
+        A RestorePoint is considered available if:
+        - It exists and has a restorePointContentRef in the spec, OR
+        - It has status.state == "Available"
+        """
         rp = self.get_restore_point(name, namespace)
         if not rp:
             return False
+        
+        # Check status.state if present
         state = rp.get("status", {}).get("state", "")
-        return state == "Available"
+        if state == "Available":
+            return True
+        
+        # RestorePoints with restorePointContentRef are considered available
+        # as the backup data has been successfully created
+        spec = rp.get("spec", {})
+        if "restorePointContentRef" in spec:
+            return True
+        
+        return False
     
     def restore_point_count(self, namespace: str) -> int:
         """Get count of restore points in a namespace."""

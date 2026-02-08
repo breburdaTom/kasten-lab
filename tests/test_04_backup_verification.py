@@ -203,9 +203,17 @@ class TestRestorePoint:
         # Check for artifacts in the spec
         spec = rp.get("spec", {})
         
-        # RestorePoint should have application data
-        assert "actions" in spec or "artifacts" in spec or "data" in spec, \
-            "RestorePoint should contain backup data"
+        # RestorePoint should have backup data reference
+        # Kasten K10 uses restorePointContentRef to reference the actual backup content
+        has_content = (
+            "restorePointContentRef" in spec or
+            "actions" in spec or 
+            "artifacts" in spec or 
+            "data" in spec
+        )
+        
+        assert has_content, \
+            f"RestorePoint should contain backup data, found spec keys: {list(spec.keys())}"
         
         logger.info(f"RestorePoint spec keys: {list(spec.keys())}")
     
