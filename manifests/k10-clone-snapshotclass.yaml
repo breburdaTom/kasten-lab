@@ -18,4 +18,7 @@ metadata:
     # Required: Enable clone operations for Kasten restore
     k10.kasten.io/isCloneClass: "true"
 driver: hostpath.csi.k8s.io
-deletionPolicy: Delete
+# CRITICAL: Must be Retain to preserve snapshots after PVC/namespace deletion
+# With Delete policy, destroying the app namespace deletes the snapshot data,
+# making restore impossible even though RestorePoints still exist
+deletionPolicy: Retain

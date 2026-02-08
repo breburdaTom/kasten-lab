@@ -91,15 +91,68 @@ verify_destruction() {
     log_info "PVCs:"; kubectl get pvc -n "${APP_NAMESPACE}" 2>/dev/null || echo "  None found"
 }
 
+verify_snapshot_data_preserved() {
+    log_info "Verifying snapshot data is preserved for restore..."
+    
+    # Check VolumeSnapshotContents (cluster-scoped, actual snapshot data)
+    local vsc_count
+    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
+    
+    if [[ "${vsc_count}" -eq 0 ]]; then
+        log_error "WARNING: No VolumeSnapshotContents found!"
+        log_error "This means snapshot data has been deleted along with the PVCs."
+        log_error "This happens when VolumeSnapshotClass deletionPolicy is 'Delete'."
+        log_error ""
+        log_error "To fix this for future backups:"
+        log_error "  1. Patch VolumeSnapshotClass: kubectl patch volumesnapshotclass csi-hostpath-snapclass --type='json' -p='[{\"op\": \"replace\", \"path\": \"/deletionPolicy\", \"value\":\"Retain\"}]'"
+        log_error "  2. Re-run the backup"
+        log_error ""
+        log_info "Current VolumeSnapshotClass policies:"
+        kubectl get volumesnapshotclass -o custom-columns='NAME:.metadata.name,POLICY:.deletionPolicy' 2>/dev/null || true
+        return 1
+    else
+        log_info "VolumeSnapshotContents preserved: ${vsc_count}"
+        log_info "Snapshot data is available for restore."
+    fi
+    
+    # Check RestorePoints still exist
+    local rp_count
+    rp_count=$(kubectl get restorepoints -n "${APP_NAMESPACE}" --no-headers 2>/dev/null | wc -l || echo "0")
+    log_info "RestorePoints in ${APP_NAMESPACE}: ${rp_count}"
+    
+    if [[ "${rp_count}" -eq 0 ]]; then
+        log_warn "No RestorePoints found in ${APP_NAMESPACE}"
+        log_info "Checking all namespaces for RestorePoints..."
+        kubectl get restorepoints --all-namespaces 2>/dev/null || echo "  None found"
+    fi
+    
+    return 0
+}
+
 main() {
     log_info "Starting application destruction..."
     log_warn "⚠️  This will DELETE all application data! ⚠️"
+    
+    # Check VolumeSnapshotClass deletion policy before destruction
+    log_info "Checking VolumeSnapshotClass deletion policies..."
+    kubectl get volumesnapshotclass -o custom-columns='NAME:.metadata.name,POLICY:.deletionPolicy' 2>/dev/null || true
+    
+    local delete_policy
+    delete_policy=$(kubectl get volumesnapshotclass csi-hostpath-snapclass -o jsonpath='{.deletionPolicy}' 2>/dev/null || echo "unknown")
+    if [[ "${delete_policy}" == "Delete" ]]; then
+        log_warn "VolumeSnapshotClass has deletionPolicy=Delete!"
+        log_warn "Deleting PVCs will also delete snapshot data, making restore impossible!"
+        log_warn "Consider patching to Retain before proceeding."
+    fi
     
     show_current_state
     delete_statefulset
     delete_pods
     delete_pvcs
     verify_destruction
+    
+    # Verify snapshot data is still available
+    verify_snapshot_data_preserved
     
     log_info "Application destruction completed successfully!"
     log_info "The application and all its data have been deleted."

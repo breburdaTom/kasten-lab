@@ -34,6 +34,75 @@ wait_for_condition() {
     return 1
 }
 
+diagnose_pending_restore() {
+    local restore_action_name="$1"
+    
+    log_warn "=== DIAGNOSING PENDING RESTOREACTION ==="
+    
+    # Check if startTime is null (controller hasn't picked it up)
+    local start_time
+    start_time=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+        -o jsonpath='{.status.startTime}' 2>/dev/null || echo "")
+    
+    if [[ -z "${start_time}" || "${start_time}" == "null" ]]; then
+        log_error "RestoreAction has null startTime - Kasten controller is NOT processing it"
+        log_info ""
+        log_info "Possible causes:"
+        log_info "  1. Kasten executor pods are not running"
+        log_info "  2. Kasten license is expired or invalid"
+        log_info "  3. RestorePointContent data is missing/corrupted"
+        log_info "  4. Kasten webhook is not functioning"
+        log_info ""
+    fi
+    
+    # Check Kasten pods
+    log_info "Kasten K10 pods status:"
+    kubectl get pods -n "${K10_NAMESPACE}" 2>/dev/null || echo "  No pods found in ${K10_NAMESPACE}"
+    
+    # Check for executor specifically
+    local executor_running
+    executor_running=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -i executor | grep -c Running || echo "0")
+    if [[ "${executor_running}" -eq 0 ]]; then
+        log_error "NO RUNNING EXECUTOR PODS FOUND - This is why RestoreAction is stuck!"
+        log_info "Check Kasten deployment:"
+        kubectl get deployments -n "${K10_NAMESPACE}" 2>/dev/null | head -10 || echo "  No deployments"
+    fi
+    
+    # Check RestorePointContent
+    local rp_name
+    rp_name=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+        -o jsonpath='{.spec.subject.name}' 2>/dev/null || echo "")
+    if [[ -n "${rp_name}" ]]; then
+        local rpc_ref
+        rpc_ref=$(kubectl get restorepoint "${rp_name}" -n "${APP_NAMESPACE}" \
+            -o jsonpath='{.spec.restorePointContentRef.name}' 2>/dev/null || echo "")
+        if [[ -n "${rpc_ref}" ]]; then
+            if ! kubectl get restorepointcontent "${rpc_ref}" &>/dev/null; then
+                log_error "RestorePointContent '${rpc_ref}' NOT FOUND - backup data may be deleted!"
+            fi
+        fi
+    fi
+    
+    # Check VolumeSnapshotContents
+    local vsc_count
+    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
+    if [[ "${vsc_count}" -eq 0 ]]; then
+        log_error "No VolumeSnapshotContents exist - snapshot data has been deleted!"
+        log_info "This typically happens when VolumeSnapshotClass deletionPolicy is 'Delete'"
+    else
+        log_info "VolumeSnapshotContents found: ${vsc_count}"
+    fi
+    
+    # Check recent events
+    log_info "Recent events in ${K10_NAMESPACE}:"
+    kubectl get events -n "${K10_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -5 || echo "  No events"
+    
+    log_info "Recent events in ${APP_NAMESPACE}:"
+    kubectl get events -n "${APP_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -5 || echo "  No events"
+    
+    log_warn "=== END DIAGNOSIS ==="
+}
+
 get_restore_point() {
     local restore_point_name="${1:-}"
     
@@ -138,6 +207,13 @@ wait_for_restore() {
                 kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml 2>/dev/null || true
                 return 1 
                 ;;
+            "Pending")
+                # If stuck in Pending for too long, diagnose the issue
+                if [[ $elapsed -ge 60 ]]; then
+                    log_warn "RestoreAction stuck in Pending state for ${elapsed}s"
+                    diagnose_pending_restore "${restore_action_name}"
+                fi
+                ;;
         esac
         
         sleep "$interval"
@@ -234,22 +310,45 @@ verify_restore_point() {
     # Check Kasten controller/executor is running
     log_info "Checking Kasten K10 services status..."
     
+    # Check all K10 pods first
+    log_info "All Kasten K10 pods:"
+    kubectl get pods -n "${K10_NAMESPACE}" 2>/dev/null || echo "  None found"
+    
     # Check executor pods (these process RestoreActions)
     local executor_pods
     executor_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l component=executor --no-headers 2>/dev/null || echo "")
     if [[ -z "${executor_pods}" ]]; then
-        log_warn "No Kasten executor pods found - RestoreActions won't be processed!"
-        log_info "Checking all K10 pods:"
-        kubectl get pods -n "${K10_NAMESPACE}" 2>/dev/null || echo "  None found"
+        # Try alternative label selectors
+        executor_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l app.kubernetes.io/component=executor --no-headers 2>/dev/null || echo "")
+    fi
+    if [[ -z "${executor_pods}" ]]; then
+        # Try finding by name pattern
+        executor_pods=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -i executor || echo "")
+    fi
+    
+    if [[ -z "${executor_pods}" ]]; then
+        log_error "No Kasten executor pods found - RestoreActions won't be processed!"
+        log_error "This is the root cause of RestoreAction stuck in Pending state"
+        log_info "Please verify Kasten K10 is properly installed:"
+        log_info "  helm list -n ${K10_NAMESPACE}"
+        log_info "  kubectl get deployments -n ${K10_NAMESPACE}"
+        return 1
     else
         log_info "Kasten executor pods:"
         echo "${executor_pods}"
         
         # Check if any executor pods are not Running
         local not_running
-        not_running=$(echo "${executor_pods}" | grep -v "Running" | wc -l || echo "0")
+        not_running=$(echo "${executor_pods}" | grep -v "Running" | grep -v "Completed" | wc -l || echo "0")
         if [[ "${not_running}" -gt 0 ]]; then
-            log_warn "Some executor pods are not in Running state!"
+            log_error "Executor pods are not in Running state - this causes RestoreAction to stay Pending!"
+            log_info "Checking executor pod logs for errors..."
+            local executor_pod_name
+            executor_pod_name=$(echo "${executor_pods}" | head -1 | awk '{print $1}')
+            if [[ -n "${executor_pod_name}" ]]; then
+                kubectl logs "${executor_pod_name}" -n "${K10_NAMESPACE}" --tail=50 2>/dev/null || true
+            fi
+            return 1
         fi
     fi
     
@@ -257,10 +356,22 @@ verify_restore_point() {
     local catalog_pods
     catalog_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l component=catalog --no-headers 2>/dev/null || echo "")
     if [[ -z "${catalog_pods}" ]]; then
+        catalog_pods=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -i catalog || echo "")
+    fi
+    if [[ -z "${catalog_pods}" ]]; then
         log_warn "No Kasten catalog pods found"
     else
-        log_info "Kasten catalog pods: $(echo "${catalog_pods}" | wc -l)"
+        log_info "Kasten catalog pods:"
+        echo "${catalog_pods}"
     fi
+    
+    # Check for any pending/failed jobs that might indicate issues
+    log_info "Checking for Kasten jobs..."
+    kubectl get jobs -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | tail -5 || echo "  No jobs found"
+    
+    # Check Kasten events for errors
+    log_info "Recent Kasten events:"
+    kubectl get events -n "${K10_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -10 || echo "  No events"
     
     return 0
 }

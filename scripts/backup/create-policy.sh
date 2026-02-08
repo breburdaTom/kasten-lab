@@ -42,6 +42,9 @@ EOF
 kubectl delete policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" 2>/dev/null || true
 
 # Create policy
+# NOTE: Kasten K10 policies select applications by namespace, not by label selector
+# The selector.matchExpressions with k10.kasten.io/appNamespace is the correct way
+# to target a specific namespace for backup
 cat <<EOF | kubectl apply -f -
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Policy
@@ -54,8 +57,11 @@ spec:
   actions:
     - action: backup
   selector:
-    matchLabels:
-      k10.kasten.io/appNamespace: ${APP_NAMESPACE}
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - ${APP_NAMESPACE}
 EOF
 
 echo "[INFO] Policy created!"

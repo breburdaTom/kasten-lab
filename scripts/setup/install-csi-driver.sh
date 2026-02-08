@@ -31,15 +31,39 @@ kubectl patch storageclass standard \
 kubectl patch storageclass csi-hostpath-sc \
     -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
-# Apply VolumeSnapshotClass
-echo "[INFO] Setting up VolumeSnapshotClass..."
-kubectl apply -f examples/csi-snapshot-v1-class.yaml 2>/dev/null || \
-kubectl apply -f examples/csi-volumesnapshotclass.yaml
+# Apply VolumeSnapshotClass with Retain policy
+# CRITICAL: The default CSI examples use Delete policy which causes snapshot data
+# to be deleted when PVCs are deleted, making restore impossible
+echo "[INFO] Setting up VolumeSnapshotClass with Retain policy..."
+cat <<EOF | kubectl apply -f -
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: csi-hostpath-snapclass
+  annotations:
+    k10.kasten.io/is-snapshot-class: "true"
+  labels:
+    k10.kasten.io/isCloneClass: "true"
+driver: hostpath.csi.k8s.io
+deletionPolicy: Retain
+EOF
 
-# Annotate for Kasten
-echo "[INFO] Configuring for Kasten K10..."
-kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
-    k10.kasten.io/is-snapshot-class=true --overwrite
+# Also create the Kasten clone snapshot class with Retain policy
+# Kasten creates this automatically but with Delete policy by default
+echo "[INFO] Creating Kasten clone snapshot class with Retain policy..."
+cat <<EOF | kubectl apply -f -
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: k10-clone-csi-hostpath-snapclass
+  labels:
+    k10.kasten.io/isCloneClass: "true"
+driver: hostpath.csi.k8s.io
+deletionPolicy: Retain
+EOF
+
+# Annotate StorageClass for Kasten
+echo "[INFO] Configuring StorageClass for Kasten K10..."
 kubectl annotate storageclass csi-hostpath-sc \
     k10.kasten.io/volume-snapshot-class=csi-hostpath-snapclass --overwrite
 
