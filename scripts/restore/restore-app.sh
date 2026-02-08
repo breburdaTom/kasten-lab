@@ -231,14 +231,35 @@ verify_restore_point() {
         return 1
     fi
     
-    # Check Kasten controller is running
-    log_info "Checking Kasten K10 controller status..."
-    local k10_pods
-    k10_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l app=k10 --no-headers 2>/dev/null | wc -l || echo "0")
-    if [[ "${k10_pods}" -eq 0 ]]; then
-        log_warn "No Kasten K10 pods found in namespace '${K10_NAMESPACE}'"
+    # Check Kasten controller/executor is running
+    log_info "Checking Kasten K10 services status..."
+    
+    # Check executor pods (these process RestoreActions)
+    local executor_pods
+    executor_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l component=executor --no-headers 2>/dev/null || echo "")
+    if [[ -z "${executor_pods}" ]]; then
+        log_warn "No Kasten executor pods found - RestoreActions won't be processed!"
+        log_info "Checking all K10 pods:"
+        kubectl get pods -n "${K10_NAMESPACE}" 2>/dev/null || echo "  None found"
     else
-        log_info "Kasten K10 pods running: ${k10_pods}"
+        log_info "Kasten executor pods:"
+        echo "${executor_pods}"
+        
+        # Check if any executor pods are not Running
+        local not_running
+        not_running=$(echo "${executor_pods}" | grep -v "Running" | wc -l || echo "0")
+        if [[ "${not_running}" -gt 0 ]]; then
+            log_warn "Some executor pods are not in Running state!"
+        fi
+    fi
+    
+    # Check catalog service (needed for RestorePoint lookups)
+    local catalog_pods
+    catalog_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l component=catalog --no-headers 2>/dev/null || echo "")
+    if [[ -z "${catalog_pods}" ]]; then
+        log_warn "No Kasten catalog pods found"
+    else
+        log_info "Kasten catalog pods: $(echo "${catalog_pods}" | wc -l)"
     fi
     
     return 0
