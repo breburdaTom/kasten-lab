@@ -41,65 +41,63 @@ wait_for_backup() {
     log_info "Waiting for backup (timeout: ${BACKUP_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $BACKUP_TIMEOUT ]]; do
-        # Get RunAction full status
-        local run_yaml run_state
-        run_yaml=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || echo "")
+        # Get RunAction status
+        local run_state
         run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
         
-        # BackupActions are created in the APPLICATION namespace, not kasten-io
-        # Filter by the RunAction label to find the correct BackupAction
-        local ba_name ba_state
-        ba_name=$(kubectl get backupactions -n "${APP_NAMESPACE}" \
+        # Per Kasten docs: BackupActions subordinate to a RunAction are labeled with k10.kasten.io/runActionName
+        # and are created in the application namespace
+        local ba_info ba_name ba_state ba_progress
+        ba_info=$(kubectl get backupactions.actions.kio.kasten.io \
             -l "k10.kasten.io/runActionName=${run_action_name}" \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            --all-namespaces \
+            -o jsonpath='{.items[0].metadata.namespace},{.items[0].metadata.name},{.items[0].status.state},{.items[0].status.progress}' 2>/dev/null || echo "")
         
-        # Fallback: check all namespaces if not found in app namespace
-        if [[ -z "$ba_name" ]]; then
-            ba_name=$(kubectl get backupactions --all-namespaces \
-                -l "k10.kasten.io/runActionName=${run_action_name}" \
-                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-        fi
-        
-        if [[ -n "$ba_name" ]]; then
-            ba_state=$(kubectl get backupaction "$ba_name" -n "${APP_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            log_info "RunAction: ${run_state} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s"
+        if [[ -n "$ba_info" && "$ba_info" != ",,," ]]; then
+            IFS=',' read -r ba_namespace ba_name ba_state ba_progress <<< "$ba_info"
+            log_info "RunAction: ${run_state} | BackupAction: ${ba_name} (${ba_state}, ${ba_progress:-0}%) | ${elapsed}s"
             
-            [[ "$ba_state" == "Complete" ]] && { log_info "Backup completed!"; return 0; }
-            [[ "$ba_state" == "Failed" ]] && { log_error "Backup failed!"; kubectl get backupaction "$ba_name" -n "${APP_NAMESPACE}" -o yaml; return 1; }
+            if [[ "$ba_state" == "Complete" ]]; then
+                log_info "Backup completed successfully!"
+                return 0
+            fi
+            if [[ "$ba_state" == "Failed" ]]; then
+                log_error "Backup failed!"
+                kubectl get backupaction "$ba_name" -n "$ba_namespace" -o yaml
+                return 1
+            fi
         else
             log_info "RunAction: ${run_state} | No BackupAction yet | ${elapsed}s"
         fi
         
-        # Check if RunAction itself completed (might complete without creating BackupAction if no apps match)
+        # Check if RunAction completed or failed
         if [[ "$run_state" == "Complete" ]]; then
-            log_info "RunAction completed"
-            # Check if any BackupAction was created
-            if [[ -z "$ba_name" ]]; then
+            if [[ -n "$ba_name" && "$ba_state" == "Complete" ]]; then
+                return 0
+            elif [[ -z "$ba_name" || "$ba_info" == ",,," ]]; then
                 log_warn "RunAction completed but no BackupAction was created."
                 log_warn "This usually means the policy selector didn't match any applications."
-                log_warn "Checking K10 discovered applications..."
                 kubectl get applications.apps.kio.kasten.io --all-namespaces 2>/dev/null || true
+                return 1
             fi
-            return 0
         fi
         
-        # Show debug info every 60 seconds if no BackupAction
-        if [[ $((elapsed % 60)) -eq 0 && $elapsed -gt 0 && -z "$ba_name" ]]; then
+        if [[ "$run_state" == "Failed" ]]; then
+            log_error "RunAction failed!"
+            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
+            return 1
+        fi
+        
+        # Show debug info every 60 seconds if no BackupAction found
+        if [[ $((elapsed % 60)) -eq 0 && $elapsed -gt 0 && ( -z "$ba_info" || "$ba_info" == ",,," ) ]]; then
             log_warn "=== Debug: RunAction status ==="
             kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
             log_warn "=== Debug: Policy status ==="
             kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null | grep -A10 "status:" || true
             log_warn "=== Debug: K10 apps in ${APP_NAMESPACE} ==="
             kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || echo "No K10 applications found"
-            log_warn "=== Debug: All BackupActions ==="
-            kubectl get backupactions --all-namespaces 2>/dev/null || echo "No BackupActions found"
-        fi
-        
-        # Check for failures
-        if [[ "$run_state" == "Failed" ]]; then
-            log_error "RunAction failed!"
-            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
-            return 1
+            log_warn "=== Debug: All BackupActions with runActionName label ==="
+            kubectl get backupactions.actions.kio.kasten.io -l "k10.kasten.io/runActionName=${run_action_name}" --all-namespaces 2>/dev/null || echo "No BackupActions found"
         fi
         
         sleep "$interval"
@@ -108,6 +106,7 @@ wait_for_backup() {
     
     log_error "Timeout! Final state:"
     kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
+    kubectl get backupactions.actions.kio.kasten.io -l "k10.kasten.io/runActionName=${run_action_name}" --all-namespaces 2>/dev/null || true
     return 1
 }
 
