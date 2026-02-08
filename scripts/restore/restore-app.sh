@@ -336,9 +336,18 @@ verify_restore() {
     local count
     count=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -t -A -c \
         "SELECT COUNT(*) FROM test_data;" 2>/dev/null || echo "0")
+    # Clean up count - remove any whitespace
+    count=$(echo "${count}" | tr -d '[:space:]')
+    count="${count:-0}"
     log_info "Records found in restored database: ${count}"
     
-    [[ "${count}" -eq 0 ]] && log_warn "No records found - data may not have been restored correctly"
+    if [[ "${count}" -eq 0 ]]; then
+        log_error "No records found - data was not restored correctly!"
+        return 1
+    fi
+    
+    log_info "Data verification successful: ${count} records restored"
+    return 0
 }
 
 verify_restore_point() {
