@@ -78,7 +78,18 @@ EOF
         return 1
     }
     
-    # Create the Location Profile
+    # Create an empty secret for the profile (required by Kasten API)
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${PROFILE_NAME}-secret
+  namespace: ${K10_NAMESPACE}
+type: Opaque
+data: {}
+EOF
+    
+    # Create the Location Profile with the secret reference
     cat <<EOF | kubectl apply -f -
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Profile
@@ -89,7 +100,12 @@ spec:
   type: Location
   locationSpec:
     credential:
-      secretType: ""
+      secretType: NoSecret
+      secret:
+        apiVersion: v1
+        kind: Secret
+        name: ${PROFILE_NAME}-secret
+        namespace: ${K10_NAMESPACE}
     type: FileStore
     fileStore:
       claimName: ${PROFILE_NAME}-pvc

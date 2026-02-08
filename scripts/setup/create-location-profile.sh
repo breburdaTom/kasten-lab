@@ -42,11 +42,27 @@ EOF
     log_info "PVC created and bound"
 }
 
+create_profile_secret() {
+    log_info "Creating secret for Location Profile..."
+    
+    # Create an empty secret (required by Kasten API even for file-based profiles)
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${PROFILE_NAME}-secret
+  namespace: ${K10_NAMESPACE}
+type: Opaque
+data: {}
+EOF
+    
+    log_info "Secret created"
+}
+
 create_location_profile() {
     log_info "Creating Location Profile '${PROFILE_NAME}'..."
     
-    # Create a file-based Location Profile using the Kasten repository server
-    # This is suitable for lab/demo environments
+    # Create a file-based Location Profile
     cat <<EOF | kubectl apply -f -
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Profile
@@ -57,7 +73,12 @@ spec:
   type: Location
   locationSpec:
     credential:
-      secretType: ""
+      secretType: NoSecret
+      secret:
+        apiVersion: v1
+        kind: Secret
+        name: ${PROFILE_NAME}-secret
+        namespace: ${K10_NAMESPACE}
     type: FileStore
     fileStore:
       claimName: ${PROFILE_NAME}-pvc
@@ -97,6 +118,7 @@ main() {
     fi
     
     create_profile_pvc
+    create_profile_secret
     create_location_profile
     verify_profile
     
