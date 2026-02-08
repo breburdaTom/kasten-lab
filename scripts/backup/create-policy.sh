@@ -6,38 +6,28 @@
 
 set -euo pipefail
 
-# Script metadata
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# Configuration
 K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 POLICY_NAME="${POLICY_NAME:-postgres-backup-policy}"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Logging functions
-log_info() { echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
+# Colors and logging
+RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' NC='\033[0m'
+log_info()  { echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
 
-# Create backup policy
 create_policy() {
     log_info "Creating backup policy '${POLICY_NAME}'..."
     
-    # Check if policy already exists
     if kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" &>/dev/null; then
         log_warn "Policy '${POLICY_NAME}' already exists, deleting..."
         kubectl delete policy "${POLICY_NAME}" -n "${K10_NAMESPACE}"
         sleep 5
     fi
     
-    # Create the policy
     cat <<EOF | kubectl apply -f -
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Policy
@@ -65,22 +55,16 @@ spec:
         values:
           - ${APP_NAMESPACE}
 EOF
-    
     log_info "Backup policy created"
 }
 
-# Verify policy
 verify_policy() {
     log_info "Verifying backup policy..."
-    
-    # Wait for policy to be created
     sleep 5
     
-    # Show policy details
     log_info "Policy details:"
     kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml
     
-    # Verify policy is valid
     local validation
     validation=$(kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.validation}' 2>/dev/null || echo "pending")
     
@@ -89,17 +73,13 @@ verify_policy() {
         kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.error}'
         exit 1
     fi
-    
     log_info "Policy validation status: ${validation}"
 }
 
-# Main execution
 main() {
     log_info "Starting backup policy creation..."
-    
     create_policy
     verify_policy
-    
     log_info "Backup policy creation completed successfully!"
 }
 
