@@ -160,31 +160,26 @@ class TestKastenDeployments:
 class TestKastenCRDs:
     """Test suite for verifying Kasten K10 CRDs."""
     
-    # CRD name patterns to look for (partial matches)
+    # Core CRD patterns that are always installed with K10
     REQUIRED_CRD_PATTERNS = [
-        "policies",
-        "profiles", 
-        "restorepoints",
-        "backupactions",
-        "restoreactions",
-        "runactions",
+        "policies.config.kio.kasten.io",
+        "profiles.config.kio.kasten.io",
     ]
     
     def test_kasten_crds_installed(self, k8s_client: K8sClient):
-        """Verify Kasten CRDs are installed."""
+        """Verify core Kasten CRDs are installed."""
         existing_crds = k8s_client.get_crds()
         kasten_crds = [crd for crd in existing_crds if "kasten.io" in crd]
         
-        logger.info(f"Found Kasten CRDs: {kasten_crds}")
+        logger.info(f"Found {len(kasten_crds)} Kasten CRDs: {kasten_crds}")
         
         missing = []
-        for pattern in self.REQUIRED_CRD_PATTERNS:
-            found = any(pattern in crd for crd in kasten_crds)
-            if not found:
-                missing.append(pattern)
+        for required_crd in self.REQUIRED_CRD_PATTERNS:
+            if required_crd not in kasten_crds:
+                missing.append(required_crd)
         
         assert len(missing) == 0, \
-            f"Missing required Kasten CRD patterns: {missing}. Found CRDs: {kasten_crds}"
+            f"Missing required Kasten CRDs: {missing}"
         
         logger.info("All required Kasten CRDs are installed")
     
