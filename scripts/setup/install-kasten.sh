@@ -64,7 +64,7 @@ install_k10() {
         "--set" "eula.company=demo"
         "--set" "eula.email=demo@example.com"
         "--set" "auth.tokenAuth.enabled=true"
-        "--set" "injectKanisterSidecar.enabled=true"
+        "--set" "injectGenericVolumeBackupSidecar.enabled=true"
         "--set" "global.persistence.storageClass=csi-hostpath-sc"
     )
     
@@ -84,10 +84,11 @@ wait_for_k10_ready() {
     
     local elapsed=0 interval=20
     while [[ $elapsed -lt $READY_TIMEOUT ]]; do
-        # Count pods not in Running/Completed state (trim whitespace)
+        # Count pods not in Running/Completed state
         local not_ready
-        not_ready=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -vcE "Running|Completed" | tr -d '[:space:]')
-        not_ready=${not_ready:-99}
+        not_ready=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -vcE "Running|Completed" || true)
+        not_ready=$(echo "$not_ready" | tr -d '[:space:]')
+        [[ -z "$not_ready" ]] && not_ready=99
         
         if [[ "$not_ready" == "0" ]]; then
             log_info "All K10 pods are running"
@@ -96,16 +97,17 @@ wait_for_k10_ready() {
         
         # Compact status: show count and any problem pods
         local problems
-        problems=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -E "Pending|ImagePull|CrashLoop|Error|0/" | awk '{print $1":"$3}' | head -5 | tr '\n' ' ')
+        problems=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -E "Pending|ImagePull|CrashLoop|Error|0/" | awk '{print $1":"$3}' | head -5 | tr '\n' ' ' || true)
         log_info "Waiting: ${not_ready} not ready (${elapsed}s/${READY_TIMEOUT}s) ${problems}"
         
         # Check for pending PVCs (common cause of stuck pods)
         local pending_pvcs
-        pending_pvcs=$(kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -cv Bound | tr -d '[:space:]')
-        pending_pvcs=${pending_pvcs:-0}
+        pending_pvcs=$(kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -cv Bound || true)
+        pending_pvcs=$(echo "$pending_pvcs" | tr -d '[:space:]')
+        [[ -z "$pending_pvcs" ]] && pending_pvcs=0
         if [[ "$pending_pvcs" != "0" ]]; then
             log_warn "PVCs not bound: ${pending_pvcs}"
-            kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -v Bound | awk '{print "  "$1": "$2}' | head -3
+            kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -v Bound | awk '{print "  "$1": "$2}' | head -3 || true
         fi
         
         sleep "$interval"
@@ -114,7 +116,7 @@ wait_for_k10_ready() {
     
     if [[ $elapsed -ge $READY_TIMEOUT ]]; then
         log_error "Timeout! Final status:"
-        kubectl get pods -n "${K10_NAMESPACE}" | grep -vE "Running|Completed" | head -10
+        kubectl get pods -n "${K10_NAMESPACE}" | grep -vE "Running|Completed" | head -10 || true
         log_error "PVC status:"
         kubectl get pvc -n "${K10_NAMESPACE}" 2>/dev/null || true
         log_error "Events:"
