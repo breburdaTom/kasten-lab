@@ -21,7 +21,8 @@ trigger_backup() {
     local run_action_name="manual-backup-$(date +%Y%m%d%H%M%S)"
     log_info "Creating RunAction: ${run_action_name}"
     
-    cat <<EOF | kubectl apply -f -
+    # Redirect kubectl output to stderr so it doesn't get captured in the return value
+    cat <<EOF | kubectl apply -f - >&2
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RunAction
 metadata:
@@ -33,6 +34,7 @@ spec:
     name: ${POLICY_NAME}
     namespace: ${K10_NAMESPACE}
 EOF
+    # Only echo the name to stdout for capture
     echo "${run_action_name}"
 }
 
