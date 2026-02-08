@@ -18,15 +18,15 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; 
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
 
 trigger_backup() {
-    local run_action_name="manual-backup-$(date +%Y%m%d%H%M%S)"
-    log_info "Creating RunAction: ${run_action_name}"
+    # Generate the name first
+    RUN_ACTION_NAME="manual-backup-$(date +%Y%m%d%H%M%S)"
+    log_info "Creating RunAction: ${RUN_ACTION_NAME}"
     
-    # Redirect kubectl output to stderr so it doesn't get captured in the return value
-    cat <<EOF | kubectl apply -f - >&2
+    kubectl apply -f - <<EOF
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RunAction
 metadata:
-  name: ${run_action_name}
+  name: ${RUN_ACTION_NAME}
   namespace: ${K10_NAMESPACE}
 spec:
   subject:
@@ -34,24 +34,42 @@ spec:
     name: ${POLICY_NAME}
     namespace: ${K10_NAMESPACE}
 EOF
-    # Only echo the name to stdout for capture
-    echo "${run_action_name}"
+    
+    # Verify the RunAction was created and show its initial state
+    sleep 2
+    log_info "Verifying RunAction creation..."
+    log_info "Looking for RunAction '${RUN_ACTION_NAME}' in namespace '${K10_NAMESPACE}'"
+    
+    # List all RunActions to see what exists
+    log_info "All RunActions in ${K10_NAMESPACE}:"
+    kubectl get runactions -n "${K10_NAMESPACE}" 2>&1 || echo "Failed to list RunActions"
+    
+    # Try to get the specific RunAction
+    if kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" &>/dev/null; then
+        log_info "RunAction ${RUN_ACTION_NAME} exists"
+        kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o yaml
+    else
+        log_error "RunAction ${RUN_ACTION_NAME} NOT FOUND after creation!"
+        log_error "Checking if it exists with different casing or in different namespace..."
+        kubectl get runactions --all-namespaces 2>&1 || echo "No RunActions found anywhere"
+        return 1
+    fi
 }
 
 wait_for_backup() {
-    local run_action_name="$1" elapsed=0 interval=15
+    local elapsed=0 interval=15
     log_info "Waiting for backup (timeout: ${BACKUP_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $BACKUP_TIMEOUT ]]; do
         # Get RunAction status
         local run_state
-        run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
+        run_state=$(kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
         
         # Per Kasten docs: BackupActions subordinate to a RunAction are labeled with k10.kasten.io/runActionName
         # and are created in the application namespace
-        local ba_info ba_name ba_state ba_progress
+        local ba_info ba_namespace ba_name ba_state ba_progress
         ba_info=$(kubectl get backupactions.actions.kio.kasten.io \
-            -l "k10.kasten.io/runActionName=${run_action_name}" \
+            -l "k10.kasten.io/runActionName=${RUN_ACTION_NAME}" \
             --all-namespaces \
             -o jsonpath='{.items[0].metadata.namespace},{.items[0].metadata.name},{.items[0].status.state},{.items[0].status.progress}' 2>/dev/null || echo "")
         
@@ -86,20 +104,20 @@ wait_for_backup() {
         
         if [[ "$run_state" == "Failed" ]]; then
             log_error "RunAction failed!"
-            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
+            kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
             return 1
         fi
         
         # Show debug info every 60 seconds if no BackupAction found
         if [[ $((elapsed % 60)) -eq 0 && $elapsed -gt 0 && ( -z "$ba_info" || "$ba_info" == ",,," ) ]]; then
-            log_warn "=== Debug: RunAction status ==="
-            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
+            log_warn "=== Debug: RunAction ${RUN_ACTION_NAME} ==="
+            kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o yaml
             log_warn "=== Debug: Policy status ==="
-            kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null | grep -A10 "status:" || true
+            kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml | grep -A10 "status:" || true
             log_warn "=== Debug: K10 apps in ${APP_NAMESPACE} ==="
             kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || echo "No K10 applications found"
-            log_warn "=== Debug: All BackupActions with runActionName label ==="
-            kubectl get backupactions.actions.kio.kasten.io -l "k10.kasten.io/runActionName=${run_action_name}" --all-namespaces 2>/dev/null || echo "No BackupActions found"
+            log_warn "=== Debug: All BackupActions (any label) ==="
+            kubectl get backupactions.actions.kio.kasten.io --all-namespaces 2>/dev/null || echo "No BackupActions found"
         fi
         
         sleep "$interval"
@@ -107,8 +125,8 @@ wait_for_backup() {
     done
     
     log_error "Timeout! Final state:"
-    kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
-    kubectl get backupactions.actions.kio.kasten.io -l "k10.kasten.io/runActionName=${run_action_name}" --all-namespaces 2>/dev/null || true
+    kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
+    kubectl get backupactions.actions.kio.kasten.io --all-namespaces 2>/dev/null || true
     return 1
 }
 
@@ -144,9 +162,9 @@ main() {
     log_info "Checking K10 application discovery for ${APP_NAMESPACE}..."
     kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || log_warn "No K10 applications discovered in ${APP_NAMESPACE}"
     
-    local run_action_name
-    run_action_name=$(trigger_backup)
-    wait_for_backup "${run_action_name}"
+    # Use global variable instead of capturing output
+    trigger_backup
+    wait_for_backup
     verify_restore_point
     log_info "Backup completed successfully!"
 }
