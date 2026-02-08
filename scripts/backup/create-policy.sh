@@ -24,7 +24,12 @@ verify_prerequisites() {
     log_info "Verifying prerequisites..."
     
     # Check VolumeSnapshotClass exists and has Kasten annotation
-    log_info "Checking VolumeSnapshotClass..."
+    log_info "Checking VolumeSnapshotClass configuration..."
+    
+    # List all VolumeSnapshotClasses
+    log_info "Available VolumeSnapshotClasses:"
+    kubectl get volumesnapshotclass -o wide 2>/dev/null || echo "No VolumeSnapshotClasses found"
+    
     local vsc_count
     vsc_count=$(kubectl get volumesnapshotclass -o jsonpath='{.items[*].metadata.annotations.k10\.kasten\.io/is-snapshot-class}' 2>/dev/null | grep -c "true" || echo "0")
     
@@ -32,10 +37,28 @@ verify_prerequisites() {
         log_warn "No VolumeSnapshotClass with Kasten annotation found. Attempting to annotate..."
         for vsc in $(kubectl get volumesnapshotclass -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
             kubectl annotate volumesnapshotclass "${vsc}" k10.kasten.io/is-snapshot-class=true --overwrite 2>/dev/null || true
+            kubectl label volumesnapshotclass "${vsc}" k10.kasten.io/isCloneClass=true --overwrite 2>/dev/null || true
             log_info "Annotated VolumeSnapshotClass: ${vsc}"
         done
     else
         log_info "Found ${vsc_count} VolumeSnapshotClass(es) with Kasten annotation"
+    fi
+    
+    # Check StorageClass has the snapshot class annotation
+    log_info "Checking StorageClass configuration..."
+    local sc_vsc
+    sc_vsc=$(kubectl get storageclass csi-hostpath-sc -o jsonpath='{.metadata.annotations.k10\.kasten\.io/volume-snapshot-class}' 2>/dev/null || echo "")
+    if [[ -z "$sc_vsc" ]]; then
+        log_warn "StorageClass 'csi-hostpath-sc' missing Kasten snapshot class annotation. Adding it..."
+        local vsc_name
+        vsc_name=$(kubectl get volumesnapshotclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [[ -n "$vsc_name" ]]; then
+            kubectl annotate storageclass csi-hostpath-sc \
+                k10.kasten.io/volume-snapshot-class="${vsc_name}" --overwrite 2>/dev/null || true
+            log_info "Added snapshot class annotation to StorageClass: ${vsc_name}"
+        fi
+    else
+        log_info "StorageClass has snapshot class annotation: ${sc_vsc}"
     fi
     
     # Check if Location Profile exists
@@ -45,7 +68,15 @@ verify_prerequisites() {
         create_location_profile
     else
         log_info "Location Profile '${PROFILE_NAME}' exists"
+        # Verify profile is valid
+        local profile_status
+        profile_status=$(kubectl get profile "${PROFILE_NAME}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.validation}' 2>/dev/null || echo "unknown")
+        log_info "Location Profile validation status: ${profile_status}"
     fi
+    
+    # Verify CSI driver is working
+    log_info "Checking CSI driver..."
+    kubectl get csidriver hostpath.csi.k8s.io -o wide 2>/dev/null || log_warn "CSI driver 'hostpath.csi.k8s.io' not found"
     
     log_info "Prerequisites verified"
 }

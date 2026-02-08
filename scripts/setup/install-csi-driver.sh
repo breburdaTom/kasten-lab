@@ -76,6 +76,7 @@ create_storage_class() {
     done
     
     # Create or update our StorageClass with Immediate binding (better for CI)
+    # Include Kasten annotation to specify the VolumeSnapshotClass to use
     cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -83,38 +84,75 @@ metadata:
   name: ${STORAGE_CLASS_NAME}
   annotations:
     storageclass.kubernetes.io/is-default-class: "true"
+    # Tell Kasten which VolumeSnapshotClass to use for this StorageClass
+    k10.kasten.io/volume-snapshot-class: csi-hostpath-snapclass
 provisioner: hostpath.csi.k8s.io
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
 EOF
-    log_info "StorageClass created"
+    log_info "StorageClass created with Kasten annotations"
 }
 
 create_snapshot_class() {
-    log_info "Creating VolumeSnapshotClass for Kasten..."
+    log_info "Creating/Updating VolumeSnapshotClass for Kasten..."
     
-    # Always create with all required Kasten annotations
-    cat <<EOF | kubectl apply -f -
+    # The CSI hostpath driver deploy script creates a VolumeSnapshotClass named "csi-hostpath-snapclass"
+    # We need to ensure it has the Kasten annotations
+    
+    # Wait a moment for the CSI driver to create its resources
+    sleep 5
+    
+    # Check all VolumeSnapshotClasses
+    log_info "Current VolumeSnapshotClasses:"
+    kubectl get volumesnapshotclass -o wide 2>/dev/null || echo "No VolumeSnapshotClasses found"
+    
+    # Find VolumeSnapshotClass for hostpath driver
+    local existing_vsc
+    existing_vsc=$(kubectl get volumesnapshotclass -o jsonpath='{.items[?(@.driver=="hostpath.csi.k8s.io")].metadata.name}' 2>/dev/null | awk '{print $1}' || echo "")
+    
+    if [[ -n "$existing_vsc" && "$existing_vsc" != "" ]]; then
+        log_info "Found existing VolumeSnapshotClass: ${existing_vsc}"
+        # Annotate the existing one for Kasten
+        kubectl annotate volumesnapshotclass "${existing_vsc}" \
+            k10.kasten.io/is-snapshot-class=true --overwrite
+        kubectl label volumesnapshotclass "${existing_vsc}" \
+            k10.kasten.io/isCloneClass=true --overwrite 2>/dev/null || true
+        
+        # Update StorageClass to reference this VolumeSnapshotClass
+        kubectl annotate storageclass "${STORAGE_CLASS_NAME}" \
+            k10.kasten.io/volume-snapshot-class="${existing_vsc}" --overwrite 2>/dev/null || true
+    else
+        log_info "No existing VolumeSnapshotClass found, creating new one..."
+        # Create with all required Kasten annotations
+        cat <<EOF | kubectl apply -f -
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
   name: csi-hostpath-snapclass
   annotations:
-    # Required: Mark as Kasten snapshot class
     k10.kasten.io/is-snapshot-class: "true"
   labels:
-    # Required for clone operations
     k10.kasten.io/isCloneClass: "true"
 driver: hostpath.csi.k8s.io
 deletionPolicy: Delete
 EOF
+        # Update StorageClass to reference this VolumeSnapshotClass
+        kubectl annotate storageclass "${STORAGE_CLASS_NAME}" \
+            k10.kasten.io/volume-snapshot-class=csi-hostpath-snapclass --overwrite 2>/dev/null || true
+    fi
     
-    # Verify the annotation was applied
-    log_info "Verifying VolumeSnapshotClass annotations..."
-    kubectl get volumesnapshotclass csi-hostpath-snapclass -o yaml | grep -A5 "annotations:" || true
+    # Verify the configuration
+    log_info "Final VolumeSnapshotClass configuration:"
+    kubectl get volumesnapshotclass -o wide
     
-    log_info "VolumeSnapshotClass created with Kasten annotations"
+    log_info "VolumeSnapshotClass YAML:"
+    kubectl get volumesnapshotclass -o yaml
+    
+    log_info "StorageClass annotations:"
+    kubectl get storageclass "${STORAGE_CLASS_NAME}" -o yaml | grep -A10 "annotations:" || true
+    
+    log_info "VolumeSnapshotClass configured for Kasten"
 }
 
 verify_installation() {
@@ -136,7 +174,44 @@ verify_installation() {
     log_info "CSI Drivers:"
     kubectl get csidrivers
     
+    # Verify CSI driver capabilities
+    log_info "CSI Driver capabilities:"
+    kubectl get csidriver hostpath.csi.k8s.io -o yaml 2>/dev/null | grep -A20 "spec:" || true
+    
     log_info "CSI Driver installation verified"
+}
+
+# Optional: Test CSI snapshot capability (not called by default)
+# Usage: CSI_DRIVER_VERSION=v1.15.0 ./install-csi-driver.sh && ./install-csi-driver.sh test
+test_snapshot_capability() {
+    log_info "Testing CSI snapshot capability..."
+    local ns="csi-snap-test-$"
+    trap "kubectl delete namespace ${ns} --ignore-not-found=true &>/dev/null" EXIT
+    
+    kubectl create namespace "${ns}" &>/dev/null
+    kubectl apply -n "${ns}" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: test-pvc }
+spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 1Gi } }, storageClassName: ${STORAGE_CLASS_NAME} }
+EOF
+    kubectl wait -n "${ns}" --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s || { log_error "PVC bind failed"; return 1; }
+    
+    local vsc=$(kubectl get volumesnapshotclass -o jsonpath='{.items[?(@.driver=="hostpath.csi.k8s.io")].metadata.name}' | awk '{print $1}')
+    [[ -z "$vsc" ]] && { log_error "No VolumeSnapshotClass found"; return 1; }
+    
+    kubectl apply -n "${ns}" -f - <<EOF
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata: { name: test-snap }
+spec: { volumeSnapshotClassName: ${vsc}, source: { persistentVolumeClaimName: test-pvc } }
+EOF
+    
+    for i in {1..30}; do
+        [[ "$(kubectl get volumesnapshot test-snap -n ${ns} -o jsonpath='{.status.readyToUse}' 2>/dev/null)" == "true" ]] && { log_info "Snapshot test passed!"; return 0; }
+        sleep 2
+    done
+    log_error "Snapshot test failed"; return 1
 }
 
 main() {
