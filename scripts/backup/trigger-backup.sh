@@ -42,24 +42,45 @@ wait_for_backup() {
     
     while [[ $elapsed -lt $BACKUP_TIMEOUT ]]; do
         # Get RunAction full status
-        local run_yaml
+        local run_yaml run_state
         run_yaml=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || echo "")
+        run_state=$(kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
         
-        local run_state
-        run_state=$(echo "$run_yaml" | grep "state:" | head -1 | awk '{print $2}' || echo "")
-        
-        # Get BackupAction
+        # BackupActions are created in the APPLICATION namespace, not kasten-io
+        # Filter by the RunAction label to find the correct BackupAction
         local ba_name ba_state
-        ba_name=$(kubectl get backupactions -n "${K10_NAMESPACE}" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
+        ba_name=$(kubectl get backupactions -n "${APP_NAMESPACE}" \
+            -l "k10.kasten.io/runActionName=${run_action_name}" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        
+        # Fallback: check all namespaces if not found in app namespace
+        if [[ -z "$ba_name" ]]; then
+            ba_name=$(kubectl get backupactions --all-namespaces \
+                -l "k10.kasten.io/runActionName=${run_action_name}" \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        fi
         
         if [[ -n "$ba_name" ]]; then
-            ba_state=$(kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            log_info "RunAction: ${run_state:-Pending} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s"
+            ba_state=$(kubectl get backupaction "$ba_name" -n "${APP_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+            log_info "RunAction: ${run_state} | BackupAction: ${ba_name} (${ba_state}) | ${elapsed}s"
             
             [[ "$ba_state" == "Complete" ]] && { log_info "Backup completed!"; return 0; }
-            [[ "$ba_state" == "Failed" ]] && { log_error "Backup failed!"; kubectl get backupaction "$ba_name" -n "${K10_NAMESPACE}" -o yaml; return 1; }
+            [[ "$ba_state" == "Failed" ]] && { log_error "Backup failed!"; kubectl get backupaction "$ba_name" -n "${APP_NAMESPACE}" -o yaml; return 1; }
         else
-            log_info "RunAction: ${run_state:-Pending} | No BackupAction yet | ${elapsed}s"
+            log_info "RunAction: ${run_state} | No BackupAction yet | ${elapsed}s"
+        fi
+        
+        # Check if RunAction itself completed (might complete without creating BackupAction if no apps match)
+        if [[ "$run_state" == "Complete" ]]; then
+            log_info "RunAction completed"
+            # Check if any BackupAction was created
+            if [[ -z "$ba_name" ]]; then
+                log_warn "RunAction completed but no BackupAction was created."
+                log_warn "This usually means the policy selector didn't match any applications."
+                log_warn "Checking K10 discovered applications..."
+                kubectl get applications.apps.kio.kasten.io --all-namespaces 2>/dev/null || true
+            fi
+            return 0
         fi
         
         # Show debug info every 60 seconds if no BackupAction
@@ -70,12 +91,14 @@ wait_for_backup() {
             kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null | grep -A10 "status:" || true
             log_warn "=== Debug: K10 apps in ${APP_NAMESPACE} ==="
             kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || echo "No K10 applications found"
+            log_warn "=== Debug: All BackupActions ==="
+            kubectl get backupactions --all-namespaces 2>/dev/null || echo "No BackupActions found"
         fi
         
         # Check for failures
-        if echo "$run_yaml" | grep -q "state: Failed"; then
+        if [[ "$run_state" == "Failed" ]]; then
             log_error "RunAction failed!"
-            echo "$run_yaml"
+            kubectl get runaction "${run_action_name}" -n "${K10_NAMESPACE}" -o yaml 2>/dev/null || true
             return 1
         fi
         
