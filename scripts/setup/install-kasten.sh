@@ -130,11 +130,24 @@ wait_for_k10_ready() {
 annotate_snapshot_class() {
     log_info "Annotating VolumeSnapshotClass for Kasten..."
     
-    for vsc in $(kubectl get volumesnapshotclass -o jsonpath='{.items[*].metadata.name}'); do
-        log_info "Annotating VolumeSnapshotClass: ${vsc}"
-        kubectl annotate volumesnapshotclass "${vsc}" k10.kasten.io/is-snapshot-class=true --overwrite || true
-    done
-    log_info "VolumeSnapshotClasses annotated"
+    # Specifically annotate csi-hostpath-snapclass (the one created by CSI driver)
+    if kubectl get volumesnapshotclass csi-hostpath-snapclass &>/dev/null; then
+        log_info "Annotating VolumeSnapshotClass: csi-hostpath-snapclass"
+        kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
+            k10.kasten.io/is-snapshot-class=true --overwrite
+    else
+        log_warn "VolumeSnapshotClass 'csi-hostpath-snapclass' not found"
+        log_info "Available VolumeSnapshotClasses:"
+        kubectl get volumesnapshotclass -o wide 2>/dev/null || echo "None"
+        
+        # Annotate any available VolumeSnapshotClass
+        for vsc in $(kubectl get volumesnapshotclass -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            log_info "Annotating VolumeSnapshotClass: ${vsc}"
+            kubectl annotate volumesnapshotclass "${vsc}" k10.kasten.io/is-snapshot-class=true --overwrite || true
+        done
+    fi
+    
+    log_info "VolumeSnapshotClass annotation complete"
 }
 
 verify_installation() {
