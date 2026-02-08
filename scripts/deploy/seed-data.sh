@@ -21,26 +21,28 @@ log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2
 create_schema() {
     log_info "Creating test database schema..."
     
-    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -c "
-        SELECT 'CREATE DATABASE testdb' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'testdb')\gexec
-    " || true
+    # Create database if it doesn't exist (ignore error if it already exists)
+    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- \
+        psql -U postgres -c "CREATE DATABASE testdb;" 2>/dev/null || true
     
-    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -c "
-        CREATE TABLE IF NOT EXISTS test_data (
-            id SERIAL PRIMARY KEY,
-            data TEXT NOT NULL,
-            checksum TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_test_data_checksum ON test_data(checksum);
-    "
+    # Create table and index
+    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- \
+        psql -U postgres -d testdb -c "
+            CREATE TABLE IF NOT EXISTS test_data (
+                id SERIAL PRIMARY KEY,
+                data TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_data_checksum ON test_data(checksum);
+        "
     log_info "Schema created"
 }
 
 insert_test_data() {
     log_info "Inserting test data with checksums..."
     
-    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -c "
+    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- psql -U postgres -d testdb -c "
         TRUNCATE TABLE test_data RESTART IDENTITY;
         INSERT INTO test_data (data, checksum) VALUES 
             ('kasten-backup-test-record-001', md5('kasten-backup-test-record-001')),
@@ -61,7 +63,7 @@ save_checksum() {
     log_info "Calculating aggregate checksum..."
     
     local checksum
-    checksum=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -t -A -c \
+    checksum=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- psql -U postgres -d testdb -t -A -c \
         "SELECT md5(string_agg(checksum, '' ORDER BY id)) FROM test_data;" | tr -d '[:space:]')
     
     echo "${checksum}" > "${CHECKSUM_FILE}"
@@ -73,11 +75,11 @@ verify_data() {
     log_info "Verifying seeded data..."
     
     local count invalid_count
-    count=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -t -A -c "SELECT COUNT(*) FROM test_data;")
+    count=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- psql -U postgres -d testdb -t -A -c "SELECT COUNT(*) FROM test_data;")
     log_info "Total records: ${count}"
     
     log_info "Verifying individual record checksums..."
-    invalid_count=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -t -A -c \
+    invalid_count=$(kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- psql -U postgres -d testdb -t -A -c \
         "SELECT COUNT(*) FROM test_data WHERE checksum != md5(data);")
     
     if [[ "${invalid_count}" -gt 0 ]]; then
@@ -87,7 +89,7 @@ verify_data() {
     log_info "All record checksums are valid"
     
     log_info "Sample data:"
-    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -- psql -U postgres -d testdb -c \
+    kubectl exec -n "${APP_NAMESPACE}" pg-database-0 -c postgres -- psql -U postgres -d testdb -c \
         "SELECT id, substring(data, 1, 30) as data_preview, checksum, created_at FROM test_data ORDER BY id LIMIT 5;"
 }
 
