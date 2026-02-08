@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: install-csi-driver.sh
-# Description: Installs the CSI Hostpath Driver for Kind cluster
+# Description: Installs the CSI Hostpath Driver for Kind cluster with snapshot support
 # ==============================================================================
 
 set -euo pipefail
@@ -9,11 +9,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# CSI Driver configuration - download from official repo
-CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-v1.15.0}"
+# CSI Driver configuration
+# Use compatible versions: CSI driver v1.14.x works well with snapshotter v7.x/v8.x
+CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-v1.14.0}"
 CSI_DRIVER_REPO="https://github.com/kubernetes-csi/csi-driver-host-path"
-CSI_DRIVER_DEPLOY_PATH="deploy/kubernetes-latest"
 STORAGE_CLASS_NAME="csi-hostpath-sc"
+SNAPSHOT_CLASS_NAME="csi-hostpath-snapclass"
 
 # Colors and logging
 RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' NC='\033[0m'
@@ -26,7 +27,7 @@ wait_for_condition() {
     local elapsed=0
     
     while [[ $elapsed -lt $timeout ]]; do
-        if eval "$condition"; then return 0; fi
+        if eval "$condition" 2>/dev/null; then return 0; fi
         sleep "$interval"
         elapsed=$((elapsed + interval))
         log_info "Waiting for ${description}... (${elapsed}s/${timeout}s)"
@@ -37,46 +38,63 @@ wait_for_condition() {
 }
 
 deploy_csi_driver() {
-    log_info "Deploying CSI Hostpath Driver..."
+    log_info "Deploying CSI Hostpath Driver (version: ${CSI_DRIVER_VERSION})..."
     
     local tmp_dir="${PROJECT_ROOT}/.tmp/csi-driver-host-path"
-    local deploy_path="${tmp_dir}/${CSI_DRIVER_DEPLOY_PATH}"
     
     # Download CSI driver
-    log_info "Downloading CSI Hostpath Driver (version: ${CSI_DRIVER_VERSION})..."
     rm -rf "${tmp_dir}"
     mkdir -p "${tmp_dir}"
     git clone --depth 1 --branch "${CSI_DRIVER_VERSION}" "${CSI_DRIVER_REPO}" "${tmp_dir}"
-    log_info "CSI Hostpath Driver downloaded to ${tmp_dir}"
     
-    # Verify deploy path exists
-    if [[ ! -d "${deploy_path}" ]]; then
-        log_error "Deploy path not found: ${deploy_path}"
-        log_error "Available directories:"
+    # Find the correct deploy path (varies by version)
+    local deploy_path=""
+    for path in "deploy/kubernetes-latest" "deploy/kubernetes-1.28" "deploy/kubernetes-1.27" "deploy/kubernetes-1.26"; do
+        if [[ -d "${tmp_dir}/${path}" ]]; then
+            deploy_path="${tmp_dir}/${path}"
+            break
+        fi
+    done
+    
+    if [[ -z "$deploy_path" ]]; then
+        log_error "No deploy path found. Available:"
         ls -la "${tmp_dir}/deploy/" 2>/dev/null || true
         exit 1
     fi
     
-    log_info "Running deploy script from: ${deploy_path}"
+    log_info "Using deploy path: ${deploy_path}"
+    
+    # Deploy the CSI driver with snapshot support
     (cd "${deploy_path}" && ./deploy.sh)
     
     # Cleanup
-    log_info "Cleaning up temporary files..."
     rm -rf "${tmp_dir}"
-    
     log_info "CSI Hostpath Driver deployed"
 }
 
-create_storage_class() {
-    log_info "Creating StorageClass '${STORAGE_CLASS_NAME}'..."
+get_csi_driver_name() {
+    # Get the actual driver name registered by the CSI driver
+    local driver_name
+    driver_name=$(kubectl get csidriver -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -E "hostpath|csi-hostpath" | head -1 || echo "")
     
-    # Remove any existing default StorageClass annotation
-    for sc in $(kubectl get storageclass -o jsonpath='{.items[*].metadata.name}'); do
+    if [[ -z "$driver_name" ]]; then
+        # Default name used by csi-driver-host-path
+        driver_name="hostpath.csi.k8s.io"
+    fi
+    
+    echo "$driver_name"
+}
+
+create_storage_class() {
+    local driver_name
+    driver_name=$(get_csi_driver_name)
+    log_info "Creating StorageClass '${STORAGE_CLASS_NAME}' with driver '${driver_name}'..."
+    
+    # Remove default annotation from other StorageClasses
+    for sc in $(kubectl get storageclass -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
         kubectl annotate storageclass "$sc" storageclass.kubernetes.io/is-default-class- 2>/dev/null || true
     done
     
-    # Create or update our StorageClass with Immediate binding (better for CI)
-    # Include Kasten annotation to specify the VolumeSnapshotClass to use
     cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -84,86 +102,51 @@ metadata:
   name: ${STORAGE_CLASS_NAME}
   annotations:
     storageclass.kubernetes.io/is-default-class: "true"
-    # Tell Kasten which VolumeSnapshotClass to use for this StorageClass
-    k10.kasten.io/volume-snapshot-class: csi-hostpath-snapclass
-provisioner: hostpath.csi.k8s.io
+    k10.kasten.io/volume-snapshot-class: ${SNAPSHOT_CLASS_NAME}
+provisioner: ${driver_name}
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
 EOF
-    log_info "StorageClass created with Kasten annotations"
+    log_info "StorageClass created"
 }
 
 create_snapshot_class() {
-    log_info "Creating/Updating VolumeSnapshotClass for Kasten..."
+    local driver_name
+    driver_name=$(get_csi_driver_name)
+    log_info "Creating VolumeSnapshotClass '${SNAPSHOT_CLASS_NAME}' with driver '${driver_name}'..."
     
-    # The CSI hostpath driver deploy script creates a VolumeSnapshotClass named "csi-hostpath-snapclass"
-    # We need to ensure it has the Kasten annotations
+    # Delete existing snapshot class if it exists with wrong driver
+    kubectl delete volumesnapshotclass "${SNAPSHOT_CLASS_NAME}" 2>/dev/null || true
     
-    # Wait a moment for the CSI driver to create its resources
-    sleep 5
-    
-    # Check all VolumeSnapshotClasses
-    log_info "Current VolumeSnapshotClasses:"
-    kubectl get volumesnapshotclass -o wide 2>/dev/null || echo "No VolumeSnapshotClasses found"
-    
-    # Find VolumeSnapshotClass for hostpath driver
-    local existing_vsc
-    existing_vsc=$(kubectl get volumesnapshotclass -o jsonpath='{.items[?(@.driver=="hostpath.csi.k8s.io")].metadata.name}' 2>/dev/null | awk '{print $1}' || echo "")
-    
-    if [[ -n "$existing_vsc" && "$existing_vsc" != "" ]]; then
-        log_info "Found existing VolumeSnapshotClass: ${existing_vsc}"
-        # Annotate the existing one for Kasten
-        kubectl annotate volumesnapshotclass "${existing_vsc}" \
-            k10.kasten.io/is-snapshot-class=true --overwrite
-        kubectl label volumesnapshotclass "${existing_vsc}" \
-            k10.kasten.io/isCloneClass=true --overwrite 2>/dev/null || true
-        
-        # Update StorageClass to reference this VolumeSnapshotClass
-        kubectl annotate storageclass "${STORAGE_CLASS_NAME}" \
-            k10.kasten.io/volume-snapshot-class="${existing_vsc}" --overwrite 2>/dev/null || true
-    else
-        log_info "No existing VolumeSnapshotClass found, creating new one..."
-        # Create with all required Kasten annotations
-        cat <<EOF | kubectl apply -f -
+    cat <<EOF | kubectl apply -f -
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
-  name: csi-hostpath-snapclass
+  name: ${SNAPSHOT_CLASS_NAME}
   annotations:
     k10.kasten.io/is-snapshot-class: "true"
   labels:
     k10.kasten.io/isCloneClass: "true"
-driver: hostpath.csi.k8s.io
+driver: ${driver_name}
 deletionPolicy: Delete
 EOF
-        # Update StorageClass to reference this VolumeSnapshotClass
-        kubectl annotate storageclass "${STORAGE_CLASS_NAME}" \
-            k10.kasten.io/volume-snapshot-class=csi-hostpath-snapclass --overwrite 2>/dev/null || true
-    fi
-    
-    # Verify the configuration
-    log_info "Final VolumeSnapshotClass configuration:"
-    kubectl get volumesnapshotclass -o wide
-    
-    log_info "VolumeSnapshotClass YAML:"
-    kubectl get volumesnapshotclass -o yaml
-    
-    log_info "StorageClass annotations:"
-    kubectl get storageclass "${STORAGE_CLASS_NAME}" -o yaml | grep -A10 "annotations:" || true
-    
-    log_info "VolumeSnapshotClass configured for Kasten"
+    log_info "VolumeSnapshotClass created"
 }
 
 verify_installation() {
     log_info "Verifying CSI Driver installation..."
     
+    # Wait for CSI driver pods
     wait_for_condition \
-        "kubectl get pods -l app.kubernetes.io/instance=hostpath.csi.k8s.io --all-namespaces --no-headers 2>/dev/null | grep -q Running" \
+        "kubectl get pods --all-namespaces -o wide 2>/dev/null | grep -E 'csi-hostpath|hostpath' | grep -q Running" \
         180 5 "CSI driver pods"
     
     log_info "CSI Driver pods:"
-    kubectl get pods -l app.kubernetes.io/instance=hostpath.csi.k8s.io --all-namespaces
+    kubectl get pods --all-namespaces -o wide 2>/dev/null | grep -E 'csi-hostpath|hostpath' || true
+    
+    log_info "CSI Drivers registered:"
+    kubectl get csidrivers
     
     log_info "StorageClasses:"
     kubectl get storageclass
@@ -171,56 +154,118 @@ verify_installation() {
     log_info "VolumeSnapshotClasses:"
     kubectl get volumesnapshotclass
     
-    log_info "CSI Drivers:"
-    kubectl get csidrivers
+    # Verify driver name matches
+    local driver_name
+    driver_name=$(get_csi_driver_name)
+    local vsc_driver
+    vsc_driver=$(kubectl get volumesnapshotclass "${SNAPSHOT_CLASS_NAME}" -o jsonpath='{.driver}' 2>/dev/null || echo "")
     
-    # Verify CSI driver capabilities
-    log_info "CSI Driver capabilities:"
-    kubectl get csidriver hostpath.csi.k8s.io -o yaml 2>/dev/null | grep -A20 "spec:" || true
+    if [[ "$driver_name" != "$vsc_driver" ]]; then
+        log_warn "Driver mismatch! CSI: ${driver_name}, VolumeSnapshotClass: ${vsc_driver}"
+        log_info "Recreating VolumeSnapshotClass with correct driver..."
+        create_snapshot_class
+    fi
     
     log_info "CSI Driver installation verified"
 }
 
-# Optional: Test CSI snapshot capability (not called by default)
-# Usage: CSI_DRIVER_VERSION=v1.15.0 ./install-csi-driver.sh && ./install-csi-driver.sh test
-test_snapshot_capability() {
+test_snapshot() {
     log_info "Testing CSI snapshot capability..."
-    local ns="csi-snap-test-$"
-    trap "kubectl delete namespace ${ns} --ignore-not-found=true &>/dev/null" EXIT
+    local ns="csi-test-$$"
+    local driver_name
+    driver_name=$(get_csi_driver_name)
     
-    kubectl create namespace "${ns}" &>/dev/null
-    kubectl apply -n "${ns}" -f - <<EOF
+    # Cleanup function
+    cleanup() {
+        kubectl delete namespace "${ns}" --ignore-not-found=true --wait=false &>/dev/null || true
+    }
+    trap cleanup EXIT
+    
+    # Create test namespace and PVC
+    kubectl create namespace "${ns}"
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: test-pvc }
-spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 1Gi } }, storageClassName: ${STORAGE_CLASS_NAME} }
+metadata:
+  name: test-pvc
+  namespace: ${ns}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ${STORAGE_CLASS_NAME}
 EOF
-    kubectl wait -n "${ns}" --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s || { log_error "PVC bind failed"; return 1; }
     
-    local vsc=$(kubectl get volumesnapshotclass -o jsonpath='{.items[?(@.driver=="hostpath.csi.k8s.io")].metadata.name}' | awk '{print $1}')
-    [[ -z "$vsc" ]] && { log_error "No VolumeSnapshotClass found"; return 1; }
+    # Wait for PVC to bind
+    if ! kubectl wait -n "${ns}" --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s; then
+        log_error "Test PVC failed to bind"
+        kubectl get pvc -n "${ns}" -o yaml
+        return 1
+    fi
+    log_info "Test PVC bound successfully"
     
-    kubectl apply -n "${ns}" -f - <<EOF
+    # Create snapshot
+    cat <<EOF | kubectl apply -f -
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
-metadata: { name: test-snap }
-spec: { volumeSnapshotClassName: ${vsc}, source: { persistentVolumeClaimName: test-pvc } }
+metadata:
+  name: test-snapshot
+  namespace: ${ns}
+spec:
+  volumeSnapshotClassName: ${SNAPSHOT_CLASS_NAME}
+  source:
+    persistentVolumeClaimName: test-pvc
 EOF
     
+    # Wait for snapshot to be ready
+    log_info "Waiting for snapshot to be ready..."
     for i in {1..30}; do
-        [[ "$(kubectl get volumesnapshot test-snap -n ${ns} -o jsonpath='{.status.readyToUse}' 2>/dev/null)" == "true" ]] && { log_info "Snapshot test passed!"; return 0; }
+        local ready
+        ready=$(kubectl get volumesnapshot test-snapshot -n "${ns}" -o jsonpath='{.status.readyToUse}' 2>/dev/null || echo "false")
+        if [[ "$ready" == "true" ]]; then
+            log_info "Snapshot test PASSED! CSI snapshots are working."
+            return 0
+        fi
+        
+        # Check for errors
+        local error
+        error=$(kubectl get volumesnapshot test-snapshot -n "${ns}" -o jsonpath='{.status.error.message}' 2>/dev/null || echo "")
+        if [[ -n "$error" ]]; then
+            log_error "Snapshot error: ${error}"
+            kubectl get volumesnapshotcontent -o yaml 2>/dev/null | tail -50 || true
+            return 1
+        fi
+        
         sleep 2
     done
-    log_error "Snapshot test failed"; return 1
+    
+    log_error "Snapshot test FAILED - timeout waiting for snapshot"
+    kubectl get volumesnapshot -n "${ns}" -o yaml
+    kubectl get volumesnapshotcontent -o yaml 2>/dev/null | tail -30 || true
+    return 1
 }
 
 main() {
     log_info "Starting CSI Hostpath Driver installation..."
+    
     deploy_csi_driver
+    
+    # Wait for CSI driver to register
+    sleep 10
+    
     create_storage_class
     create_snapshot_class
     verify_installation
-    log_info "CSI Hostpath Driver installation completed successfully!"
+    
+    # Run snapshot test to validate everything works
+    if test_snapshot; then
+        log_info "CSI Hostpath Driver installation completed successfully!"
+    else
+        log_error "CSI Driver installed but snapshot test failed!"
+        log_error "Kasten K10 backups may not work correctly."
+        exit 1
+    fi
 }
 
 main "$@"
