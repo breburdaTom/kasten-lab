@@ -18,7 +18,7 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; 
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
 
 trigger_backup() {
-    # Generate the name first
+    # Generate the RunAction name
     RUN_ACTION_NAME="manual-backup-$(date +%Y%m%d%H%M%S)"
     log_info "Creating RunAction: ${RUN_ACTION_NAME}"
     
@@ -35,25 +35,13 @@ spec:
     namespace: ${K10_NAMESPACE}
 EOF
     
-    # Verify the RunAction was created and show its initial state
+    # Verify the RunAction was created
     sleep 2
-    log_info "Verifying RunAction creation..."
-    log_info "Looking for RunAction '${RUN_ACTION_NAME}' in namespace '${K10_NAMESPACE}'"
-    
-    # List all RunActions to see what exists
-    log_info "All RunActions in ${K10_NAMESPACE}:"
-    kubectl get runactions -n "${K10_NAMESPACE}" 2>&1 || echo "Failed to list RunActions"
-    
-    # Try to get the specific RunAction
-    if kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" &>/dev/null; then
-        log_info "RunAction ${RUN_ACTION_NAME} exists"
-        kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o yaml
-    else
-        log_error "RunAction ${RUN_ACTION_NAME} NOT FOUND after creation!"
-        log_error "Checking if it exists with different casing or in different namespace..."
-        kubectl get runactions --all-namespaces 2>&1 || echo "No RunActions found anywhere"
+    if ! kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" &>/dev/null; then
+        log_error "Failed to create RunAction ${RUN_ACTION_NAME}"
         return 1
     fi
+    log_info "RunAction ${RUN_ACTION_NAME} created successfully"
 }
 
 wait_for_backup() {
@@ -66,7 +54,6 @@ wait_for_backup() {
         run_state=$(kubectl get runaction "${RUN_ACTION_NAME}" -n "${K10_NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
         
         # Per Kasten docs: BackupActions subordinate to a RunAction are labeled with k10.kasten.io/runActionName
-        # and are created in the application namespace
         local ba_info ba_namespace ba_name ba_state ba_progress
         ba_info=$(kubectl get backupactions.actions.kio.kasten.io \
             -l "k10.kasten.io/runActionName=${RUN_ACTION_NAME}" \
@@ -116,7 +103,7 @@ wait_for_backup() {
             kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" -o yaml | grep -A10 "status:" || true
             log_warn "=== Debug: K10 apps in ${APP_NAMESPACE} ==="
             kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || echo "No K10 applications found"
-            log_warn "=== Debug: All BackupActions (any label) ==="
+            log_warn "=== Debug: All BackupActions ==="
             kubectl get backupactions.actions.kio.kasten.io --all-namespaces 2>/dev/null || echo "No BackupActions found"
         fi
         
@@ -162,7 +149,6 @@ main() {
     log_info "Checking K10 application discovery for ${APP_NAMESPACE}..."
     kubectl get applications.apps.kio.kasten.io -n "${APP_NAMESPACE}" 2>/dev/null || log_warn "No K10 applications discovered in ${APP_NAMESPACE}"
     
-    # Use global variable instead of capturing output
     trigger_backup
     wait_for_backup
     verify_restore_point

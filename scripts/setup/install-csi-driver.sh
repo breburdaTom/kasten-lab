@@ -94,21 +94,27 @@ EOF
 create_snapshot_class() {
     log_info "Creating VolumeSnapshotClass for Kasten..."
     
-    if [[ -f "${PROJECT_ROOT}/manifests/k10-clone-snapshotclass.yaml" ]]; then
-        kubectl apply -f "${PROJECT_ROOT}/manifests/k10-clone-snapshotclass.yaml"
-    else
-        cat <<EOF | kubectl apply -f -
+    # Always create with all required Kasten annotations
+    cat <<EOF | kubectl apply -f -
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
   name: csi-hostpath-snapclass
   annotations:
+    # Required: Mark as Kasten snapshot class
     k10.kasten.io/is-snapshot-class: "true"
+  labels:
+    # Required for clone operations
+    k10.kasten.io/isCloneClass: "true"
 driver: hostpath.csi.k8s.io
 deletionPolicy: Delete
 EOF
-    fi
-    log_info "VolumeSnapshotClass created"
+    
+    # Verify the annotation was applied
+    log_info "Verifying VolumeSnapshotClass annotations..."
+    kubectl get volumesnapshotclass csi-hostpath-snapclass -o yaml | grep -A5 "annotations:" || true
+    
+    log_info "VolumeSnapshotClass created with Kasten annotations"
 }
 
 verify_installation() {
