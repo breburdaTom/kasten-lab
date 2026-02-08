@@ -40,9 +40,9 @@ diagnose_pending_restore() {
     log_warn "=== DIAGNOSING PENDING RESTOREACTION ==="
     
     # Check if startTime is null (controller hasn't picked it up)
-    # RestoreActions are in kasten-io namespace
+    # RestoreActions are in the app namespace
     local start_time
-    start_time=$(kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" \
+    start_time=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
         -o jsonpath='{.status.startTime}' 2>/dev/null || echo "")
     
     if [[ -z "${start_time}" || "${start_time}" == "null" ]]; then
@@ -71,7 +71,7 @@ diagnose_pending_restore() {
     
     # Check RestorePointContent
     local rp_name
-    rp_name=$(kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" \
+    rp_name=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
         -o jsonpath='{.spec.subject.name}' 2>/dev/null || echo "")
     if [[ -n "${rp_name}" ]]; then
         local rpc_ref
@@ -133,10 +133,10 @@ create_restore_action() {
     local restore_action_name="restore-$(date +%Y%m%d%H%M%S)"
     
     # Check if there's already a completed RestoreAction for this RestorePoint
-    # RestoreActions are in kasten-io namespace
+    # RestoreActions are in the app namespace (same as targetNamespace)
     log_info "Checking for existing RestoreActions for RestorePoint: ${restore_point}"
     local existing_ra
-    existing_ra=$(kubectl get restoreactions -n "${K10_NAMESPACE}" \
+    existing_ra=$(kubectl get restoreactions -n "${APP_NAMESPACE}" \
         -o jsonpath='{range .items[*]}{.metadata.name},{.spec.subject.name},{.status.state}{"\n"}{end}' 2>/dev/null | \
         grep ",${restore_point}," | grep ",Complete$" | head -1 | cut -d',' -f1 || echo "")
     
@@ -149,7 +149,7 @@ create_restore_action() {
     
     # Check if there's a running RestoreAction for this RestorePoint
     local running_ra
-    running_ra=$(kubectl get restoreactions -n "${K10_NAMESPACE}" \
+    running_ra=$(kubectl get restoreactions -n "${APP_NAMESPACE}" \
         -o jsonpath='{range .items[*]}{.metadata.name},{.spec.subject.name},{.status.state}{"\n"}{end}' 2>/dev/null | \
         grep ",${restore_point}," | grep -E ",(Running|Pending)$" | head -1 | cut -d',' -f1 || echo "")
     
@@ -162,37 +162,52 @@ create_restore_action() {
     
     log_info "Creating RestoreAction: ${restore_action_name} using RestorePoint: ${restore_point}"
     
-    # IMPORTANT: RestoreActions should be created in the KASTEN namespace (kasten-io),
-    # not in the application namespace. The Kasten controller watches for actions
-    # in its own namespace and processes them.
-    # The subject references the RestorePoint (which is in the app namespace),
-    # and targetNamespace specifies where to restore the application.
+    # Get the RestorePointContent reference to verify the backup data exists
+    local rpc_name
+    rpc_name=$(kubectl get restorepoint "${restore_point}" -n "${APP_NAMESPACE}" \
+        -o jsonpath='{.spec.restorePointContentRef.name}' 2>/dev/null || echo "")
+    
+    if [[ -z "${rpc_name}" ]]; then
+        log_error "RestorePoint '${restore_point}' has no restorePointContentRef - backup may be incomplete"
+        return 1
+    fi
+    log_info "RestorePointContent: ${rpc_name}"
+    
+    # Verify RestorePointContent exists
+    if ! kubectl get restorepointcontent "${rpc_name}" &>/dev/null; then
+        log_error "RestorePointContent '${rpc_name}' not found - backup data is missing"
+        return 1
+    fi
+    
+    # IMPORTANT: Per Kasten K10 API:
+    # - RestoreAction must be created in the SAME namespace as targetNamespace
+    # - The subject references the RestorePoint (which is in the app namespace)
+    # - For in-place restore (same namespace), we can omit targetNamespace
     cat <<EOF | kubectl apply -f -
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RestoreAction
 metadata:
   name: ${restore_action_name}
-  namespace: ${K10_NAMESPACE}
+  namespace: ${APP_NAMESPACE}
 spec:
   subject:
     kind: RestorePoint
     name: ${restore_point}
     namespace: ${APP_NAMESPACE}
-  targetNamespace: ${APP_NAMESPACE}
 EOF
     
     # Wait a moment for the RestoreAction to be created and picked up by the controller
     sleep 2
     
-    # Verify the RestoreAction was created (in kasten-io namespace)
-    if ! kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" &>/dev/null; then
+    # Verify the RestoreAction was created (in app namespace)
+    if ! kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" &>/dev/null; then
         log_error "Failed to create RestoreAction"
         return 1
     fi
     
     log_info "RestoreAction created successfully"
     log_info "RestoreAction YAML:"
-    kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" -o yaml
+    kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml
     
     echo "${restore_action_name}"
 }
@@ -202,25 +217,25 @@ wait_for_restore() {
     log_info "Waiting for restore to complete (timeout: ${RESTORE_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $RESTORE_TIMEOUT ]]; do
-        # Get RestoreAction details from kasten-io namespace
+        # Get RestoreAction details from app namespace
         local state="" progress="" error=""
         
-        # RestoreActions are created in kasten-io namespace
-        if kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" &>/dev/null; then
-            state=$(kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" \
+        # RestoreActions are created in app namespace (same as targetNamespace)
+        if kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" &>/dev/null; then
+            state=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
                 -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            progress=$(kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" \
+            progress=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
                 -o jsonpath='{.status.progress}' 2>/dev/null || echo "")
-            error=$(kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" \
+            error=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
                 -o jsonpath='{.status.error}' 2>/dev/null || echo "")
         fi
         
         # If state is empty, check if RestoreAction exists at all
         if [[ -z "${state}" ]]; then
             local ra_exists
-            ra_exists=$(kubectl get restoreaction "${restore_action_name}" -n "${K10_NAMESPACE}" -o name 2>/dev/null || echo "")
+            ra_exists=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o name 2>/dev/null || echo "")
             if [[ -z "${ra_exists}" ]]; then
-                log_warn "RestoreAction '${restore_action_name}' not found in namespace '${K10_NAMESPACE}'"
+                log_warn "RestoreAction '${restore_action_name}' not found in namespace '${APP_NAMESPACE}'"
                 # List all RestoreActions to help debug
                 log_info "Available RestoreActions:"
                 kubectl get restoreactions --all-namespaces 2>/dev/null || echo "  None found"
@@ -366,8 +381,11 @@ verify_restore_point() {
     
     # Check if there are volumeSnapshot references in the content
     local vs_refs
-    vs_refs=$(echo "${rpc_yaml}" | grep -c "volumeSnapshot" || echo "0")
-    if [[ "${vs_refs}" -eq 0 ]]; then
+    vs_refs=$(echo "${rpc_yaml}" | grep -c "volumeSnapshot" 2>/dev/null || true)
+    vs_refs="${vs_refs:-0}"
+    # Remove any whitespace/newlines
+    vs_refs=$(echo "${vs_refs}" | tr -d '[:space:]')
+    if [[ -z "${vs_refs}" || "${vs_refs}" == "0" ]]; then
         log_warn "RestorePointContent has no volumeSnapshot references"
         log_info "RestorePointContent YAML:"
         echo "${rpc_yaml}"
