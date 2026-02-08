@@ -18,8 +18,30 @@ echo "[INFO] Triggering backup for policy '${POLICY_NAME}'..."
 
 # Verify Kasten K10 is ready
 echo "[INFO] Checking Kasten K10 readiness..."
-if ! kubectl get pods -n "${K10_NAMESPACE}" -l component=executor --no-headers 2>/dev/null | grep -q Running; then
+
+# Check for executor pods using multiple possible label selectors
+EXECUTOR_RUNNING=false
+
+# Try different label selectors that Kasten might use
+for label in "component=executor" "app.kubernetes.io/component=executor" "app=k10"; do
+    if kubectl get pods -n "${K10_NAMESPACE}" -l "${label}" --no-headers 2>/dev/null | grep -q Running; then
+        EXECUTOR_RUNNING=true
+        echo "[INFO] Found running pods with label: ${label}"
+        break
+    fi
+done
+
+# Also check by deployment name pattern
+if [[ "${EXECUTOR_RUNNING}" != "true" ]]; then
+    if kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -i "executor" | grep -q Running; then
+        EXECUTOR_RUNNING=true
+        echo "[INFO] Found running executor pods by name pattern"
+    fi
+fi
+
+if [[ "${EXECUTOR_RUNNING}" != "true" ]]; then
     echo "[ERROR] Kasten executor pods are not running"
+    echo "[INFO] All pods in ${K10_NAMESPACE}:"
     kubectl get pods -n "${K10_NAMESPACE}" 2>/dev/null || echo "  No pods found"
     exit 1
 fi
