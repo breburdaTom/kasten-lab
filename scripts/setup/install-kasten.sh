@@ -84,10 +84,12 @@ wait_for_k10_ready() {
     
     local elapsed=0 interval=20
     while [[ $elapsed -lt $READY_TIMEOUT ]]; do
+        # Count pods not in Running/Completed state (trim whitespace)
         local not_ready
-        not_ready=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -vcE "Running|Completed" || echo "99")
+        not_ready=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -vcE "Running|Completed" | tr -d '[:space:]')
+        not_ready=${not_ready:-99}
         
-        if [[ "$not_ready" -eq 0 ]]; then
+        if [[ "$not_ready" == "0" ]]; then
             log_info "All K10 pods are running"
             break
         fi
@@ -99,8 +101,9 @@ wait_for_k10_ready() {
         
         # Check for pending PVCs (common cause of stuck pods)
         local pending_pvcs
-        pending_pvcs=$(kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -v Bound | wc -l || echo "0")
-        if [[ "$pending_pvcs" -gt 0 ]]; then
+        pending_pvcs=$(kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -cv Bound | tr -d '[:space:]')
+        pending_pvcs=${pending_pvcs:-0}
+        if [[ "$pending_pvcs" != "0" ]]; then
             log_warn "PVCs not bound: ${pending_pvcs}"
             kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -v Bound | awk '{print "  "$1": "$2}' | head -3
         fi
