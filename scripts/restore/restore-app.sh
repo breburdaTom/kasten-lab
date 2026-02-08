@@ -184,7 +184,7 @@ create_restore_action() {
     # - RestoreAction must be created in the SAME namespace as targetNamespace
     # - The subject references the RestorePoint (which is in the app namespace)
     # - targetNamespace MUST match the RestoreAction's namespace
-    cat <<EOF | kubectl apply -f -
+    cat <<EOF | kubectl apply -f - >&2
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RestoreAction
 metadata:
