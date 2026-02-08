@@ -171,24 +171,21 @@ verify_installation() {
 
 test_snapshot() {
     log_info "Testing CSI snapshot capability..."
-    local ns="csi-test-$$"
-    local driver_name
-    driver_name=$(get_csi_driver_name)
+    local test_ns="csi-test-${RANDOM}"
     
-    # Cleanup function
-    cleanup() {
-        kubectl delete namespace "${ns}" --ignore-not-found=true --wait=false &>/dev/null || true
+    # Cleanup function - delete test namespace at the end
+    cleanup_test() {
+        kubectl delete namespace "${test_ns}" --ignore-not-found=true --wait=false &>/dev/null || true
     }
-    trap cleanup EXIT
     
     # Create test namespace and PVC
-    kubectl create namespace "${ns}"
+    kubectl create namespace "${test_ns}"
     cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: test-pvc
-  namespace: ${ns}
+  namespace: ${test_ns}
 spec:
   accessModes: [ReadWriteOnce]
   resources:
@@ -198,9 +195,10 @@ spec:
 EOF
     
     # Wait for PVC to bind
-    if ! kubectl wait -n "${ns}" --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s; then
+    if ! kubectl wait -n "${test_ns}" --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s; then
         log_error "Test PVC failed to bind"
-        kubectl get pvc -n "${ns}" -o yaml
+        kubectl get pvc -n "${test_ns}" -o yaml
+        cleanup_test
         return 1
     fi
     log_info "Test PVC bound successfully"
@@ -211,7 +209,7 @@ apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
 metadata:
   name: test-snapshot
-  namespace: ${ns}
+  namespace: ${test_ns}
 spec:
   volumeSnapshotClassName: ${SNAPSHOT_CLASS_NAME}
   source:
@@ -222,18 +220,20 @@ EOF
     log_info "Waiting for snapshot to be ready..."
     for i in {1..30}; do
         local ready
-        ready=$(kubectl get volumesnapshot test-snapshot -n "${ns}" -o jsonpath='{.status.readyToUse}' 2>/dev/null || echo "false")
+        ready=$(kubectl get volumesnapshot test-snapshot -n "${test_ns}" -o jsonpath='{.status.readyToUse}' 2>/dev/null || echo "false")
         if [[ "$ready" == "true" ]]; then
             log_info "Snapshot test PASSED! CSI snapshots are working."
+            cleanup_test
             return 0
         fi
         
         # Check for errors
         local error
-        error=$(kubectl get volumesnapshot test-snapshot -n "${ns}" -o jsonpath='{.status.error.message}' 2>/dev/null || echo "")
+        error=$(kubectl get volumesnapshot test-snapshot -n "${test_ns}" -o jsonpath='{.status.error.message}' 2>/dev/null || echo "")
         if [[ -n "$error" ]]; then
             log_error "Snapshot error: ${error}"
             kubectl get volumesnapshotcontent -o yaml 2>/dev/null | tail -50 || true
+            cleanup_test
             return 1
         fi
         
@@ -241,8 +241,9 @@ EOF
     done
     
     log_error "Snapshot test FAILED - timeout waiting for snapshot"
-    kubectl get volumesnapshot -n "${ns}" -o yaml
+    kubectl get volumesnapshot -n "${test_ns}" -o yaml
     kubectl get volumesnapshotcontent -o yaml 2>/dev/null | tail -30 || true
+    cleanup_test
     return 1
 }
 
