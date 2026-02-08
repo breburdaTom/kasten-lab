@@ -42,12 +42,6 @@ spec:
       backupParameters:
         filters:
           includeClusterResources: []
-  retention:
-    hourly: 24
-    daily: 7
-    weekly: 4
-    monthly: 12
-    yearly: 5
   selector:
     matchExpressions:
       - key: k10.kasten.io/appNamespace
