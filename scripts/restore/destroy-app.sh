@@ -9,29 +9,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+source "${SCRIPT_DIR}/../lib/common.sh"
+
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 WAIT_TIMEOUT="${DESTROY_TIMEOUT:-120}"
-
-# Colors and logging
-RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' NC='\033[0m'
-log_info()  { echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
-
-wait_for_condition() {
-    local condition="$1" timeout="${2:-120}" interval="${3:-5}" description="${4:-condition}"
-    local elapsed=0
-    
-    while [[ $elapsed -lt $timeout ]]; do
-        if eval "$condition"; then return 0; fi
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-        log_info "Waiting for ${description}... (${elapsed}s/${timeout}s)"
-    done
-    
-    log_error "Timeout waiting for ${description}"
-    return 1
-}
 
 show_current_state() {
     log_info "Current state before destruction:"

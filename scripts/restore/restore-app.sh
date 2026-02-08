@@ -9,98 +9,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+source "${SCRIPT_DIR}/../lib/common.sh"
+
 K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-300}"
 
-# Colors and logging - ALL logs go to stderr to avoid polluting function return values
-RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' NC='\033[0m'
-log_info()  { echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
-log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
-
-wait_for_condition() {
-    local condition="$1" timeout="${2:-300}" interval="${3:-10}" description="${4:-condition}"
-    local elapsed=0
-    
-    while [[ $elapsed -lt $timeout ]]; do
-        if eval "$condition"; then return 0; fi
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-        log_info "Waiting for ${description}... (${elapsed}s/${timeout}s)"
-    done
-    
-    log_error "Timeout waiting for ${description}"
-    return 1
-}
-
 diagnose_pending_restore() {
     local restore_action_name="$1"
-    
     log_warn "=== DIAGNOSING PENDING RESTOREACTION ==="
     
-    # Check if startTime is null (controller hasn't picked it up)
-    # RestoreActions are in the app namespace
+    # Check if controller is processing the action
     local start_time
     start_time=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
         -o jsonpath='{.status.startTime}' 2>/dev/null || echo "")
+    [[ -z "${start_time}" || "${start_time}" == "null" ]] && \
+        log_error "RestoreAction has null startTime - controller not processing"
     
-    if [[ -z "${start_time}" || "${start_time}" == "null" ]]; then
-        log_error "RestoreAction has null startTime - Kasten controller is NOT processing it"
-        log_info ""
-        log_info "Possible causes:"
-        log_info "  1. Kasten executor pods are not running"
-        log_info "  2. Kasten license is expired or invalid"
-        log_info "  3. RestorePointContent data is missing/corrupted"
-        log_info "  4. Kasten webhook is not functioning"
-        log_info ""
-    fi
+    # Check executor pods
+    check_kasten_executor "${K10_NAMESPACE}"
     
-    # Check Kasten pods
-    log_info "Kasten K10 pods status:"
-    kubectl get pods -n "${K10_NAMESPACE}" 2>/dev/null || echo "  No pods found in ${K10_NAMESPACE}"
+    # Check snapshot data
+    check_snapshot_data_exists
     
-    # Check for executor specifically
-    local executor_running
-    executor_running=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -i executor | grep -c Running || echo "0")
-    if [[ "${executor_running}" -eq 0 ]]; then
-        log_error "NO RUNNING EXECUTOR PODS FOUND - This is why RestoreAction is stuck!"
-        log_info "Check Kasten deployment:"
-        kubectl get deployments -n "${K10_NAMESPACE}" 2>/dev/null | head -10 || echo "  No deployments"
-    fi
-    
-    # Check RestorePointContent
-    local rp_name
-    rp_name=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
-        -o jsonpath='{.spec.subject.name}' 2>/dev/null || echo "")
-    if [[ -n "${rp_name}" ]]; then
-        local rpc_ref
-        rpc_ref=$(kubectl get restorepoint "${rp_name}" -n "${APP_NAMESPACE}" \
-            -o jsonpath='{.spec.restorePointContentRef.name}' 2>/dev/null || echo "")
-        if [[ -n "${rpc_ref}" ]]; then
-            if ! kubectl get restorepointcontent "${rpc_ref}" &>/dev/null; then
-                log_error "RestorePointContent '${rpc_ref}' NOT FOUND - backup data may be deleted!"
-            fi
-        fi
-    fi
-    
-    # Check VolumeSnapshotContents
-    local vsc_count
-    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
-    vsc_count="${vsc_count:-0}"
-    if [[ "${vsc_count}" -eq 0 ]]; then
-        log_error "No VolumeSnapshotContents exist - snapshot data has been deleted!"
-        log_info "This typically happens when VolumeSnapshotClass deletionPolicy is 'Delete'"
-    else
-        log_info "VolumeSnapshotContents found: ${vsc_count}"
-    fi
-    
-    # Check recent events
-    log_info "Recent events in ${K10_NAMESPACE}:"
-    kubectl get events -n "${K10_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -5 || echo "  No events"
-    
-    log_info "Recent events in ${APP_NAMESPACE}:"
-    kubectl get events -n "${APP_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -5 || echo "  No events"
+    # Show recent events
+    log_info "Recent events:"
+    kubectl get events -n "${K10_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -3 || true
     
     log_warn "=== END DIAGNOSIS ==="
 }

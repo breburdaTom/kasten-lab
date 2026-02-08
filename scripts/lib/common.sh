@@ -51,3 +51,39 @@ wait_for_condition() {
     log_error "Timeout waiting for ${description}"
     return 1
 }
+
+# ==============================================================================
+# check_kasten_executor
+# Description: Check if Kasten executor pods are running
+# Arguments:
+#   $1 - namespace: Kasten namespace (default: kasten-io)
+# Returns:
+#   0 if executor is running, 1 otherwise
+# ==============================================================================
+check_kasten_executor() {
+    local namespace="${1:-kasten-io}"
+    if kubectl get pods -n "${namespace}" --no-headers 2>/dev/null | grep -iE "executor.*Running|Running.*executor" | grep -q .; then
+        return 0
+    fi
+    log_error "No running Kasten executor pods found in ${namespace}"
+    kubectl get pods -n "${namespace}" 2>/dev/null || echo "  No pods found"
+    return 1
+}
+
+# ==============================================================================
+# check_snapshot_data_exists
+# Description: Check if VolumeSnapshotContents exist (snapshot data available)
+# Returns:
+#   0 if snapshots exist, 1 otherwise
+# ==============================================================================
+check_snapshot_data_exists() {
+    local vsc_count
+    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    if [[ "${vsc_count:-0}" -eq 0 ]]; then
+        log_error "No VolumeSnapshotContents found - snapshot data may be deleted"
+        log_info "This typically happens when VolumeSnapshotClass deletionPolicy is 'Delete'"
+        return 1
+    fi
+    log_info "VolumeSnapshotContents found: ${vsc_count}"
+    return 0
+}
