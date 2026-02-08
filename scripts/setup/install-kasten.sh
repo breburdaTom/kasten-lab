@@ -82,13 +82,30 @@ install_k10() {
 wait_for_k10_ready() {
     log_info "Waiting for Kasten K10 to be ready (timeout: ${READY_TIMEOUT}s)..."
     
-    wait_for_condition \
-        "kubectl get pods -n ${K10_NAMESPACE} --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l | grep -q '^0$'" \
-        "${READY_TIMEOUT}" 15 "all K10 pods to be running"
+    local elapsed=0 interval=20
+    while [[ $elapsed -lt $READY_TIMEOUT ]]; do
+        local not_ready
+        not_ready=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -vcE "Running|Completed" || echo "99")
+        
+        if [[ "$not_ready" -eq 0 ]]; then
+            log_info "All K10 pods are running"
+            break
+        fi
+        
+        # Compact status: show count and any problem pods
+        local problems
+        problems=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -E "Pending|ImagePull|CrashLoop|Error|0/" | awk '{print $1":"$3}' | head -5 | tr '\n' ' ')
+        log_info "Waiting: ${not_ready} not ready (${elapsed}s/${READY_TIMEOUT}s) ${problems}"
+        
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
     
-    wait_for_condition \
-        "kubectl get pods -n ${K10_NAMESPACE} -l app=gateway --no-headers 2>/dev/null | grep -q '1/1.*Running'" \
-        120 10 "K10 gateway pod"
+    if [[ $elapsed -ge $READY_TIMEOUT ]]; then
+        log_error "Timeout! Final status:"
+        kubectl get pods -n "${K10_NAMESPACE}" | grep -vE "Running|Completed" | head -10
+        return 1
+    fi
     
     log_info "Kasten K10 is ready"
 }
