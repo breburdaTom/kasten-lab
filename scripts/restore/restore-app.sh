@@ -64,6 +64,8 @@ create_restore_action() {
     
     log_info "Creating RestoreAction: ${restore_action_name} using RestorePoint: ${restore_point}"
     
+    # Per Kasten K10 API docs, RestoreAction must be created in the target namespace
+    # The subject references the RestorePoint, and targetNamespace specifies where to restore
     cat <<EOF | kubectl apply -f -
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RestoreAction
@@ -72,14 +74,22 @@ metadata:
   namespace: ${APP_NAMESPACE}
 spec:
   subject:
-    apiVersion: apps.kio.kasten.io/v1alpha1
     kind: RestorePoint
     name: ${restore_point}
     namespace: ${APP_NAMESPACE}
   targetNamespace: ${APP_NAMESPACE}
 EOF
     
-    log_info "RestoreAction created"
+    # Verify the RestoreAction was created
+    if ! kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" &>/dev/null; then
+        log_error "Failed to create RestoreAction"
+        return 1
+    fi
+    
+    log_info "RestoreAction created successfully"
+    log_info "RestoreAction YAML:"
+    kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml
+    
     echo "${restore_action_name}"
 }
 
@@ -88,23 +98,55 @@ wait_for_restore() {
     log_info "Waiting for restore to complete (timeout: ${RESTORE_TIMEOUT}s)..."
     
     while [[ $elapsed -lt $RESTORE_TIMEOUT ]]; do
-        local state
-        state=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
-            -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-        log_info "RestoreAction state: ${state}"
+        # Get RestoreAction details - check both app namespace and all namespaces
+        local state="" progress="" error=""
+        
+        # First try the app namespace
+        if kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" &>/dev/null; then
+            state=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+            progress=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                -o jsonpath='{.status.progress}' 2>/dev/null || echo "")
+            error=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                -o jsonpath='{.status.error}' 2>/dev/null || echo "")
+        fi
+        
+        # If state is empty, check if RestoreAction exists at all
+        if [[ -z "${state}" ]]; then
+            local ra_exists
+            ra_exists=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o name 2>/dev/null || echo "")
+            if [[ -z "${ra_exists}" ]]; then
+                log_warn "RestoreAction '${restore_action_name}' not found in namespace '${APP_NAMESPACE}'"
+                # List all RestoreActions to help debug
+                log_info "Available RestoreActions:"
+                kubectl get restoreactions --all-namespaces 2>/dev/null || echo "  None found"
+            else
+                state="Pending"
+            fi
+        fi
+        
+        log_info "RestoreAction: ${restore_action_name} | State: ${state:-unknown} | Progress: ${progress:-0}% | Elapsed: ${elapsed}s"
         
         case "${state}" in
-            "Complete") log_info "Restore completed successfully!"; return 0 ;;
+            "Complete") 
+                log_info "Restore completed successfully!"
+                return 0 
+                ;;
             "Failed")
-                log_error "Restore failed: $(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o jsonpath='{.status.error}' 2>/dev/null)"
-                return 1 ;;
+                log_error "Restore failed!"
+                log_error "Error: ${error}"
+                kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml 2>/dev/null || true
+                return 1 
+                ;;
         esac
         
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
     
-    log_error "Timeout waiting for restore to complete"
+    log_error "Timeout waiting for restore to complete after ${RESTORE_TIMEOUT}s"
+    log_error "Final RestoreAction state:"
+    kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml 2>/dev/null || true
     return 1
 }
 
@@ -142,6 +184,66 @@ verify_restore() {
     [[ "${count}" -eq 0 ]] && log_warn "No records found - data may not have been restored correctly"
 }
 
+verify_restore_point() {
+    local restore_point="$1"
+    
+    log_info "Verifying RestorePoint and its content..."
+    
+    # Check RestorePoint exists
+    if ! kubectl get restorepoint "${restore_point}" -n "${APP_NAMESPACE}" &>/dev/null; then
+        log_error "RestorePoint '${restore_point}' not found in namespace '${APP_NAMESPACE}'"
+        return 1
+    fi
+    
+    # Get RestorePointContent reference
+    local rpc_name
+    rpc_name=$(kubectl get restorepoint "${restore_point}" -n "${APP_NAMESPACE}" \
+        -o jsonpath='{.spec.restorePointContentRef.name}' 2>/dev/null || echo "")
+    
+    if [[ -z "${rpc_name}" ]]; then
+        log_error "RestorePoint '${restore_point}' has no restorePointContentRef"
+        return 1
+    fi
+    
+    log_info "RestorePointContent reference: ${rpc_name}"
+    
+    # Check RestorePointContent exists (cluster-scoped resource)
+    if ! kubectl get restorepointcontent "${rpc_name}" &>/dev/null; then
+        log_error "RestorePointContent '${rpc_name}' not found"
+        log_info "Available RestorePointContents:"
+        kubectl get restorepointcontents 2>/dev/null | head -10 || echo "  None found"
+        return 1
+    fi
+    
+    log_info "RestorePointContent '${rpc_name}' exists"
+    
+    # Check VolumeSnapshotContents (cluster-scoped, actual snapshot data)
+    log_info "Checking VolumeSnapshot data availability..."
+    local vsc_count
+    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
+    log_info "VolumeSnapshotContents in cluster: ${vsc_count}"
+    if [[ "${vsc_count}" -eq 0 ]]; then
+        log_error "No VolumeSnapshotContents found - snapshot data has been deleted!"
+        log_error "This happens when VolumeSnapshotClass deletionPolicy is 'Delete'"
+        log_info "Checking VolumeSnapshotClass policies..."
+        kubectl get volumesnapshotclass -o custom-columns='NAME:.metadata.name,POLICY:.deletionPolicy' 2>/dev/null || true
+        log_error "Restore will fail. Please re-run the backup with Retain deletion policy."
+        return 1
+    fi
+    
+    # Check Kasten controller is running
+    log_info "Checking Kasten K10 controller status..."
+    local k10_pods
+    k10_pods=$(kubectl get pods -n "${K10_NAMESPACE}" -l app=k10 --no-headers 2>/dev/null | wc -l || echo "0")
+    if [[ "${k10_pods}" -eq 0 ]]; then
+        log_warn "No Kasten K10 pods found in namespace '${K10_NAMESPACE}'"
+    else
+        log_info "Kasten K10 pods running: ${k10_pods}"
+    fi
+    
+    return 0
+}
+
 main() {
     local restore_point_name="${1:-}"
     log_info "Starting application restore..."
@@ -152,6 +254,9 @@ main() {
     
     log_info "RestorePoint details:"
     kubectl get restorepoint "${restore_point}" -n "${APP_NAMESPACE}" -o yaml
+    
+    # Verify RestorePoint and snapshot data before proceeding
+    verify_restore_point "${restore_point}"
     
     local restore_action_name
     restore_action_name=$(create_restore_action "${restore_point}")

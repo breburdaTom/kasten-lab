@@ -29,6 +29,21 @@ spec:
 EOF
 
 echo "[INFO] RunAction '${RUN_ACTION}' created"
+
+# Patch Kasten's clone snapshot class to Retain if it exists
+# This ensures snapshot data persists after namespace/PVC deletion
+echo "[INFO] Checking for Kasten clone snapshot class..."
+sleep 5  # Give Kasten time to create the clone class
+if kubectl get volumesnapshotclass k10-clone-csi-hostpath-snapclass &>/dev/null; then
+    echo "[INFO] Patching k10-clone-csi-hostpath-snapclass deletionPolicy to Retain..."
+    kubectl patch volumesnapshotclass k10-clone-csi-hostpath-snapclass \
+        --type='json' \
+        -p='[{"op": "replace", "path": "/deletionPolicy", "value":"Retain"}]' 2>/dev/null || true
+    echo "[INFO] Clone snapshot class patched"
+else
+    echo "[INFO] Clone snapshot class not found yet (will be created during backup)"
+fi
+
 echo "[INFO] Waiting for backup to complete (timeout: ${TIMEOUT}s)..."
 
 # Wait for backup

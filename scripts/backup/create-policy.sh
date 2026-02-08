@@ -18,6 +18,26 @@ kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
 kubectl annotate storageclass csi-hostpath-sc \
     k10.kasten.io/volume-snapshot-class=csi-hostpath-snapclass --overwrite 2>/dev/null || true
 
+# Ensure the base snapshot class has Retain policy
+echo "[INFO] Ensuring VolumeSnapshotClass deletionPolicy is Retain..."
+kubectl patch volumesnapshotclass csi-hostpath-snapclass \
+    --type='json' \
+    -p='[{"op": "replace", "path": "/deletionPolicy", "value":"Retain"}]' 2>/dev/null || true
+
+# Pre-create the Kasten clone snapshot class with Retain policy
+# This prevents Kasten from creating it with Delete policy
+echo "[INFO] Creating/patching Kasten clone snapshot class with Retain policy..."
+cat <<EOF | kubectl apply -f -
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: k10-clone-csi-hostpath-snapclass
+  labels:
+    k10.kasten.io/isCloneClass: "true"
+driver: hostpath.csi.k8s.io
+deletionPolicy: Retain
+EOF
+
 # Delete existing policy if present
 kubectl delete policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" 2>/dev/null || true
 
