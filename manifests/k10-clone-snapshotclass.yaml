@@ -2,6 +2,7 @@
 # This enables Kasten to create volume snapshots using the CSI hostpath driver
 #
 # Required annotations:
+# - snapshot.storage.kubernetes.io/is-default-class: "true" - Makes this the default snapshot class
 # - k10.kasten.io/is-snapshot-class: "true" - Marks this as the snapshot class for Kasten
 #
 # Required labels:
@@ -12,6 +13,8 @@ kind: VolumeSnapshotClass
 metadata:
   name: csi-hostpath-snapclass
   annotations:
+    # Required: Mark as default VolumeSnapshotClass for the cluster
+    snapshot.storage.kubernetes.io/is-default-class: "true"
     # Required: Mark this as the snapshot class for Kasten K10
     k10.kasten.io/is-snapshot-class: "true"
   labels:

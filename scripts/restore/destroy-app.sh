@@ -84,6 +84,26 @@ verify_destruction() {
     wait_for_condition "[[ \$(kubectl get pods -n ${APP_NAMESPACE} --no-headers 2>/dev/null | wc -l) -eq 0 ]]" 60 5 "all pods deletion"
     wait_for_condition "[[ \$(kubectl get pvc -n ${APP_NAMESPACE} --no-headers 2>/dev/null | wc -l) -eq 0 ]]" 60 5 "all PVCs deletion"
     
+    # Also wait for any PVs that were bound to our PVCs to be released/deleted
+    log_info "Checking for lingering PersistentVolumes..."
+    local pv_count
+    pv_count=$(kubectl get pv --no-headers 2>/dev/null | grep -c "${APP_NAMESPACE}" || echo "0")
+    if [[ "${pv_count}" -gt 0 ]]; then
+        log_warn "Found ${pv_count} PVs still referencing ${APP_NAMESPACE}, waiting for cleanup..."
+        wait_for_condition "[[ \$(kubectl get pv --no-headers 2>/dev/null | grep -c '${APP_NAMESPACE}' || echo '0') -eq 0 ]]" 60 5 "PV cleanup"
+    fi
+    
+    # Clean up any old RestoreActions that might interfere with new restores
+    log_info "Cleaning up old RestoreActions..."
+    local old_ras
+    old_ras=$(kubectl get restoreactions -n "${APP_NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    if [[ -n "${old_ras}" ]]; then
+        for ra in ${old_ras}; do
+            log_info "Deleting old RestoreAction: ${ra}"
+            kubectl delete restoreaction "${ra}" -n "${APP_NAMESPACE}" --wait=false 2>/dev/null || true
+        done
+    fi
+    
     log_info "Application destruction verified"
     log_info "Final state after destruction:"
     log_info "StatefulSets:"; kubectl get statefulset -n "${APP_NAMESPACE}" 2>/dev/null || echo "  None found"

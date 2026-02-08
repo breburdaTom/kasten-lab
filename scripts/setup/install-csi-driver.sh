@@ -41,8 +41,12 @@ kind: VolumeSnapshotClass
 metadata:
   name: csi-hostpath-snapclass
   annotations:
+    # Mark as default VolumeSnapshotClass for the cluster
+    snapshot.storage.kubernetes.io/is-default-class: "true"
+    # Mark as the snapshot class for Kasten K10
     k10.kasten.io/is-snapshot-class: "true"
   labels:
+    # Enable clone operations for Kasten restore
     k10.kasten.io/isCloneClass: "true"
 driver: hostpath.csi.k8s.io
 deletionPolicy: Retain

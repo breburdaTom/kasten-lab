@@ -131,6 +131,33 @@ create_restore_action() {
     local restore_point="$1"
     local restore_action_name="restore-$(date +%Y%m%d%H%M%S)"
     
+    # Check if there's already a completed RestoreAction for this RestorePoint
+    log_info "Checking for existing RestoreActions for RestorePoint: ${restore_point}"
+    local existing_ra
+    existing_ra=$(kubectl get restoreactions -n "${APP_NAMESPACE}" \
+        -o jsonpath='{range .items[*]}{.metadata.name},{.spec.subject.name},{.status.state}{"\n"}{end}' 2>/dev/null | \
+        grep ",${restore_point}," | grep ",Complete$" | head -1 | cut -d',' -f1 || echo "")
+    
+    if [[ -n "${existing_ra}" ]]; then
+        log_info "Found existing completed RestoreAction '${existing_ra}' for RestorePoint '${restore_point}'"
+        log_info "Skipping creation of new RestoreAction"
+        echo "${existing_ra}"
+        return 0
+    fi
+    
+    # Check if there's a running RestoreAction for this RestorePoint
+    local running_ra
+    running_ra=$(kubectl get restoreactions -n "${APP_NAMESPACE}" \
+        -o jsonpath='{range .items[*]}{.metadata.name},{.spec.subject.name},{.status.state}{"\n"}{end}' 2>/dev/null | \
+        grep ",${restore_point}," | grep -E ",(Running|Pending)$" | head -1 | cut -d',' -f1 || echo "")
+    
+    if [[ -n "${running_ra}" ]]; then
+        log_info "Found existing in-progress RestoreAction '${running_ra}' for RestorePoint '${restore_point}'"
+        log_info "Will wait for existing RestoreAction instead of creating a new one"
+        echo "${running_ra}"
+        return 0
+    fi
+    
     log_info "Creating RestoreAction: ${restore_action_name} using RestorePoint: ${restore_point}"
     
     # Per Kasten K10 API docs, RestoreAction must be created in the target namespace
@@ -148,6 +175,9 @@ spec:
     namespace: ${APP_NAMESPACE}
   targetNamespace: ${APP_NAMESPACE}
 EOF
+    
+    # Wait a moment for the RestoreAction to be created and picked up by the controller
+    sleep 2
     
     # Verify the RestoreAction was created
     if ! kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" &>/dev/null; then
@@ -211,6 +241,35 @@ wait_for_restore() {
                 # If stuck in Pending for too long, diagnose the issue
                 if [[ $elapsed -ge 60 ]]; then
                     log_warn "RestoreAction stuck in Pending state for ${elapsed}s"
+                    diagnose_pending_restore "${restore_action_name}"
+                fi
+                ;;
+            "Running")
+                # If stuck in Running for too long, diagnose the issue
+                if [[ $elapsed -ge 120 ]]; then
+                    log_warn "RestoreAction stuck in Running state for ${elapsed}s"
+                    log_info "Checking RestoreAction status details..."
+                    local ra_status
+                    ra_status=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                        -o jsonpath='{.status}' 2>/dev/null || echo "{}")
+                    log_info "RestoreAction status: ${ra_status}"
+                    
+                    # Check if restorePoint.name is empty (indicates controller issue)
+                    local rp_in_status
+                    rp_in_status=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                        -o jsonpath='{.status.restorePoint.name}' 2>/dev/null || echo "")
+                    if [[ -z "${rp_in_status}" ]]; then
+                        log_error "RestoreAction status.restorePoint.name is empty!"
+                        log_error "This indicates the Kasten controller cannot resolve the RestorePoint reference."
+                        log_info "Checking RestorePoint and RestorePointContent..."
+                        local rp_name
+                        rp_name=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                            -o jsonpath='{.spec.subject.name}' 2>/dev/null || echo "")
+                        if [[ -n "${rp_name}" ]]; then
+                            log_info "RestorePoint from spec: ${rp_name}"
+                            kubectl get restorepoint "${rp_name}" -n "${APP_NAMESPACE}" -o yaml 2>/dev/null || log_error "RestorePoint not found!"
+                        fi
+                    fi
                     diagnose_pending_restore "${restore_action_name}"
                 fi
                 ;;
@@ -278,6 +337,8 @@ verify_restore_point() {
     
     if [[ -z "${rpc_name}" ]]; then
         log_error "RestorePoint '${restore_point}' has no restorePointContentRef"
+        log_info "RestorePoint YAML:"
+        kubectl get restorepoint "${restore_point}" -n "${APP_NAMESPACE}" -o yaml
         return 1
     fi
     
@@ -292,6 +353,22 @@ verify_restore_point() {
     fi
     
     log_info "RestorePointContent '${rpc_name}' exists"
+    
+    # Verify RestorePointContent has valid snapshot references
+    log_info "Checking RestorePointContent snapshot references..."
+    local rpc_yaml
+    rpc_yaml=$(kubectl get restorepointcontent "${rpc_name}" -o yaml 2>/dev/null)
+    
+    # Check if there are volumeSnapshot references in the content
+    local vs_refs
+    vs_refs=$(echo "${rpc_yaml}" | grep -c "volumeSnapshot" || echo "0")
+    if [[ "${vs_refs}" -eq 0 ]]; then
+        log_warn "RestorePointContent has no volumeSnapshot references"
+        log_info "RestorePointContent YAML:"
+        echo "${rpc_yaml}"
+    else
+        log_info "RestorePointContent has ${vs_refs} volumeSnapshot reference(s)"
+    fi
     
     # Check VolumeSnapshotContents (cluster-scoped, actual snapshot data)
     log_info "Checking VolumeSnapshot data availability..."

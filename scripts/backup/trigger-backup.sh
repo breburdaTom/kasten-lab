@@ -97,6 +97,32 @@ while [[ $elapsed -lt $TIMEOUT ]]; do
         
         if [[ "$ba_state" == "Complete" ]]; then
             echo "[INFO] Backup completed successfully!"
+            
+            # Verify VolumeSnapshotContents are ready before declaring success
+            echo "[INFO] Verifying VolumeSnapshotContents are ready..."
+            vsc_ready=0
+            for vsc_check in {1..12}; do
+                ready_count=$(kubectl get volumesnapshotcontents -o jsonpath='{range .items[*]}{.status.readyToUse}{"\n"}{end}' 2>/dev/null | grep -c "true" || echo "0")
+                total_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
+                
+                if [[ "${ready_count}" -gt 0 && "${ready_count}" -eq "${total_count}" ]]; then
+                    echo "[INFO] All VolumeSnapshotContents are ready (${ready_count}/${total_count})"
+                    vsc_ready=1
+                    break
+                fi
+                echo "[INFO] Waiting for VolumeSnapshotContents to be ready (${ready_count}/${total_count})..."
+                sleep 5
+            done
+            
+            if [[ "${vsc_ready}" -eq 0 ]]; then
+                echo "[WARN] VolumeSnapshotContents may not be fully ready"
+                kubectl get volumesnapshotcontents -o custom-columns='NAME:.metadata.name,READY:.status.readyToUse' 2>/dev/null || true
+            fi
+            
+            # Show RestorePoint info
+            echo "[INFO] RestorePoints created:"
+            kubectl get restorepoints -n "${APP_NAMESPACE}" 2>/dev/null || echo "  None found"
+            
             exit 0
         fi
         
