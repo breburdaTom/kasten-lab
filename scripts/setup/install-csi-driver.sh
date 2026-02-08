@@ -70,11 +70,12 @@ deploy_csi_driver() {
 create_storage_class() {
     log_info "Creating StorageClass '${STORAGE_CLASS_NAME}'..."
     
-    if kubectl get storageclass "${STORAGE_CLASS_NAME}" &>/dev/null; then
-        log_warn "StorageClass '${STORAGE_CLASS_NAME}' already exists, skipping creation"
-        return 0
-    fi
+    # Remove any existing default StorageClass annotation
+    for sc in $(kubectl get storageclass -o jsonpath='{.items[*].metadata.name}'); do
+        kubectl annotate storageclass "$sc" storageclass.kubernetes.io/is-default-class- 2>/dev/null || true
+    done
     
+    # Create or update our StorageClass with Immediate binding (better for CI)
     cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -84,7 +85,7 @@ metadata:
     storageclass.kubernetes.io/is-default-class: "true"
 provisioner: hostpath.csi.k8s.io
 reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
+volumeBindingMode: Immediate
 allowVolumeExpansion: true
 EOF
     log_info "StorageClass created"

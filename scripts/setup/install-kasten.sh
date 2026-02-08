@@ -97,6 +97,14 @@ wait_for_k10_ready() {
         problems=$(kubectl get pods -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -E "Pending|ImagePull|CrashLoop|Error|0/" | awk '{print $1":"$3}' | head -5 | tr '\n' ' ')
         log_info "Waiting: ${not_ready} not ready (${elapsed}s/${READY_TIMEOUT}s) ${problems}"
         
+        # Check for pending PVCs (common cause of stuck pods)
+        local pending_pvcs
+        pending_pvcs=$(kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -v Bound | wc -l || echo "0")
+        if [[ "$pending_pvcs" -gt 0 ]]; then
+            log_warn "PVCs not bound: ${pending_pvcs}"
+            kubectl get pvc -n "${K10_NAMESPACE}" --no-headers 2>/dev/null | grep -v Bound | awk '{print "  "$1": "$2}' | head -3
+        fi
+        
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
@@ -104,6 +112,10 @@ wait_for_k10_ready() {
     if [[ $elapsed -ge $READY_TIMEOUT ]]; then
         log_error "Timeout! Final status:"
         kubectl get pods -n "${K10_NAMESPACE}" | grep -vE "Running|Completed" | head -10
+        log_error "PVC status:"
+        kubectl get pvc -n "${K10_NAMESPACE}" 2>/dev/null || true
+        log_error "Events:"
+        kubectl get events -n "${K10_NAMESPACE}" --sort-by='.lastTimestamp' 2>/dev/null | tail -10 || true
         return 1
     fi
     
