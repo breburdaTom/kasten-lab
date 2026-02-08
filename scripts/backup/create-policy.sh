@@ -40,8 +40,12 @@ spec:
   actions:
     - action: backup
   selector:
-    matchNamespaces:
-      - ${APP_NAMESPACE}
+    resourceSelectors:
+      - matchExpressions:
+          - key: k10.kasten.io/appNamespace
+            operator: In
+            values:
+              - ${APP_NAMESPACE}
 EOF
     log_info "Backup policy created"
 }
