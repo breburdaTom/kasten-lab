@@ -132,16 +132,34 @@ class KastenClient:
         )
         return actions[0]
     
-    def get_backup_action_state(self, name: str) -> Optional[str]:
-        """Get the state of a backup action."""
+    def get_backup_action_state(self, name: str, namespace: Optional[str] = None) -> Optional[str]:
+        """Get the state of a backup action.
+        
+        Args:
+            name: Name of the backup action
+            namespace: Namespace where the backup action exists (defaults to searching all namespaces)
+        """
         try:
-            action = self.custom_objects.get_namespaced_custom_object(
-                group=self.ACTIONS_GROUP,
-                version=self.API_VERSION,
-                namespace=self.k10_namespace,
-                plural="backupactions",
-                name=name
-            )
+            if namespace:
+                action = self.custom_objects.get_namespaced_custom_object(
+                    group=self.ACTIONS_GROUP,
+                    version=self.API_VERSION,
+                    namespace=namespace,
+                    plural="backupactions",
+                    name=name
+                )
+            else:
+                # Search all namespaces since BackupActions are in app namespace
+                result = self.custom_objects.list_cluster_custom_object(
+                    group=self.ACTIONS_GROUP,
+                    version=self.API_VERSION,
+                    plural="backupactions",
+                    field_selector=f"metadata.name={name}"
+                )
+                items = result.get("items", [])
+                if not items:
+                    return None
+                action = items[0]
             return action.get("status", {}).get("state")
         except ApiException:
             return None
