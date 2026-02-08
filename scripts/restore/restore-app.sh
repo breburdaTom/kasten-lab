@@ -13,10 +13,10 @@ K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-300}"
 
-# Colors and logging
+# Colors and logging - ALL logs go to stderr to avoid polluting function return values
 RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' NC='\033[0m'
-log_info()  { echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*"; }
+log_info()  { echo -e "${GREEN}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $*" >&2; }
 
 wait_for_condition() {
@@ -86,7 +86,8 @@ diagnose_pending_restore() {
     
     # Check VolumeSnapshotContents
     local vsc_count
-    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
+    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    vsc_count="${vsc_count:-0}"
     if [[ "${vsc_count}" -eq 0 ]]; then
         log_error "No VolumeSnapshotContents exist - snapshot data has been deleted!"
         log_info "This typically happens when VolumeSnapshotClass deletionPolicy is 'Delete'"
@@ -182,7 +183,7 @@ create_restore_action() {
     # IMPORTANT: Per Kasten K10 API:
     # - RestoreAction must be created in the SAME namespace as targetNamespace
     # - The subject references the RestorePoint (which is in the app namespace)
-    # - For in-place restore (same namespace), we can omit targetNamespace
+    # - targetNamespace MUST match the RestoreAction's namespace
     cat <<EOF | kubectl apply -f -
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RestoreAction
@@ -194,6 +195,7 @@ spec:
     kind: RestorePoint
     name: ${restore_point}
     namespace: ${APP_NAMESPACE}
+  targetNamespace: ${APP_NAMESPACE}
 EOF
     
     # Wait a moment for the RestoreAction to be created and picked up by the controller
@@ -207,7 +209,7 @@ EOF
     
     log_info "RestoreAction created successfully"
     log_info "RestoreAction YAML:"
-    kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml
+    kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" -o yaml >&2
     
     echo "${restore_action_name}"
 }
@@ -388,7 +390,7 @@ verify_restore_point() {
     if [[ -z "${vs_refs}" || "${vs_refs}" == "0" ]]; then
         log_warn "RestorePointContent has no volumeSnapshot references"
         log_info "RestorePointContent YAML:"
-        echo "${rpc_yaml}"
+        echo "${rpc_yaml}" >&2
     else
         log_info "RestorePointContent has ${vs_refs} volumeSnapshot reference(s)"
     fi
@@ -396,7 +398,8 @@ verify_restore_point() {
     # Check VolumeSnapshotContents (cluster-scoped, actual snapshot data)
     log_info "Checking VolumeSnapshot data availability..."
     local vsc_count
-    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
+    vsc_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    vsc_count="${vsc_count:-0}"
     log_info "VolumeSnapshotContents in cluster: ${vsc_count}"
     if [[ "${vsc_count}" -eq 0 ]]; then
         log_error "No VolumeSnapshotContents found - snapshot data has been deleted!"
@@ -435,11 +438,12 @@ verify_restore_point() {
         return 1
     else
         log_info "Kasten executor pods:"
-        echo "${executor_pods}"
+        echo "${executor_pods}" >&2
         
         # Check if any executor pods are not Running
         local not_running
-        not_running=$(echo "${executor_pods}" | grep -v "Running" | grep -v "Completed" | wc -l || echo "0")
+        not_running=$(echo "${executor_pods}" | grep -v "Running" | grep -v "Completed" | wc -l | tr -d '[:space:]' || echo "0")
+        not_running="${not_running:-0}"
         if [[ "${not_running}" -gt 0 ]]; then
             log_error "Executor pods are not in Running state - this causes RestoreAction to stay Pending!"
             log_info "Checking executor pod logs for errors..."
@@ -462,7 +466,7 @@ verify_restore_point() {
         log_warn "No Kasten catalog pods found"
     else
         log_info "Kasten catalog pods:"
-        echo "${catalog_pods}"
+        echo "${catalog_pods}" >&2
     fi
     
     # Check for any pending/failed jobs that might indicate issues
