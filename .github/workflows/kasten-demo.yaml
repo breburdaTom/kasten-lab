@@ -85,15 +85,15 @@ jobs:
           chmod +x scripts/setup/install-kind.sh
           ./scripts/setup/install-kind.sh
 
-      - name: "📸 Install Snapshot Controller"
-        run: |
-          chmod +x scripts/setup/install-snapshot-controller.sh
-          ./scripts/setup/install-snapshot-controller.sh
-
       - name: "💾 Install CSI Hostpath Driver"
         run: |
           chmod +x scripts/setup/install-csi-driver.sh
           ./scripts/setup/install-csi-driver.sh
+
+      - name: "📸 Install Snapshot Controller"
+        run: |
+          chmod +x scripts/setup/install-snapshot-controller.sh
+          ./scripts/setup/install-snapshot-controller.sh
 
       - name: Verify cluster setup
         run: |
@@ -111,6 +111,25 @@ jobs:
       # =========================================================================
       - name: "📦 Install Kasten K10"
         run: |
+          echo "=== Preflight: verify prerequisites before installing Kasten ==="
+          echo "StorageClasses:" && kubectl get storageclass || true
+          echo "VolumeSnapshotClasses:" && kubectl get volumesnapshotclass || true
+          echo "Snapshot Controller:" && kubectl -n kube-system get deploy snapshot-controller || true
+
+          # Fail fast if critical prerequisites are missing
+          if ! kubectl get storageclass csi-hostpath-sc >/dev/null 2>&1; then
+            echo "ERROR: Required StorageClass 'csi-hostpath-sc' not found. Ensure CSI driver is installed." >&2
+            exit 1
+          fi
+          if ! kubectl get volumesnapshotclass csi-hostpath-snapclass >/dev/null 2>&1; then
+            echo "ERROR: Required VolumeSnapshotClass 'csi-hostpath-snapclass' not found. Ensure CSI driver manifests applied." >&2
+            exit 1
+          fi
+          if ! kubectl -n kube-system get deploy snapshot-controller >/dev/null 2>&1; then
+            echo "ERROR: Snapshot Controller deployment not found in kube-system. Run snapshot-controller install." >&2
+            exit 1
+          fi
+
           chmod +x scripts/setup/install-kasten.sh
           ./scripts/setup/install-kasten.sh
         env:
