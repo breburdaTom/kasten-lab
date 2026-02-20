@@ -68,13 +68,11 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
-            exec:
-              command:
-                - pg_isready
-                - -U
-                - postgres
-            initialDelaySeconds: 30
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 60
             periodSeconds: 10
+            failureThreshold: 6
   volumeClaimTemplates:
     - metadata:
         name: pg-data

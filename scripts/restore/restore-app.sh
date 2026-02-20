@@ -158,12 +158,13 @@ wait_for_restore() {
         
         # RestoreActions are created in app namespace (same as targetNamespace)
         if kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" &>/dev/null; then
-            state=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
-                -o jsonpath='{.status.state}' 2>/dev/null || echo "")
-            progress=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
-                -o jsonpath='{.status.progress}' 2>/dev/null || echo "")
-            error=$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
-                -o jsonpath='{.status.error}' 2>/dev/null || echo "")
+            normalize() { local v="$1"; [[ -z "$v" || "$v" == "null" ]] && echo "" || echo "$v"; }
+            state=$(normalize "$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                -o jsonpath='{.status.state}' 2>/dev/null)")
+            progress=$(normalize "$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                -o jsonpath='{.status.progress}' 2>/dev/null)")
+            error=$(normalize "$(kubectl get restoreaction "${restore_action_name}" -n "${APP_NAMESPACE}" \
+                -o jsonpath='{.status.error}' 2>/dev/null)")
         fi
         
         # If state is empty, check if RestoreAction exists at all

@@ -60,11 +60,11 @@ echo "[INFO] Waiting for backup to complete (timeout: ${TIMEOUT}s)..."
 # Wait for backup
 elapsed=0
 while [[ $elapsed -lt $TIMEOUT ]]; do
-    # Get RunAction state
-    run_state=$(kubectl get runaction "${RUN_ACTION}" -n "${K10_NAMESPACE}" \
-        -o jsonpath='{.status.state}' 2>/dev/null || echo "Pending")
-    
-    # Get BackupAction info (search all namespaces with the runActionName label)
+    # Batch fetch RunAction and BackupAction info to reduce kubectl calls
+    combined=$(kubectl get runaction "${RUN_ACTION}" -n "${K10_NAMESPACE}" -o json 2>/dev/null | \
+        jq -r '.status.state // "Pending"' 2>/dev/null) || combined="Pending"
+    run_state="${combined}"
+
     ba_info=$(kubectl get backupactions.actions.kio.kasten.io \
         -l "k10.kasten.io/runActionName=${RUN_ACTION}" \
         --all-namespaces \
@@ -81,10 +81,17 @@ while [[ $elapsed -lt $TIMEOUT ]]; do
             echo "[INFO] Verifying VolumeSnapshotContents are ready..."
             vsc_ready=0
             for vsc_check in {1..12}; do
-                ready_count=$(kubectl get volumesnapshotcontents -o jsonpath='{range .items[*]}{.status.readyToUse}{"\n"}{end}' 2>/dev/null | grep -c "true" || echo "0")
-                total_count=$(kubectl get volumesnapshotcontents --no-headers 2>/dev/null | wc -l || echo "0")
-                
-                if [[ "${ready_count}" -gt 0 && "${ready_count}" -eq "${total_count}" ]]; then
+                # Fetch once and reuse counts
+                vsc_json=$(kubectl get volumesnapshotcontents -o json 2>/dev/null || echo '{}')
+                total_count=$(echo "$vsc_json" | jq '.items | length' 2>/dev/null || echo 0)
+                if [[ -z "$total_count" || "$total_count" == "null" ]]; then total_count=0; fi
+                if [[ "$total_count" -eq 0 ]]; then
+                    echo "[WARN] No VolumeSnapshotContents found yet (${vsc_check}/12). Waiting..."
+                    sleep 5
+                    continue
+                fi
+                ready_count=$(echo "$vsc_json" | jq '[.items[] | select(.status.readyToUse==true)] | length' 2>/dev/null || echo 0)
+                if [[ "$ready_count" -eq "$total_count" ]]; then
                     echo "[INFO] All VolumeSnapshotContents are ready (${ready_count}/${total_count})"
                     vsc_ready=1
                     break

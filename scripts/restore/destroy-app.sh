@@ -54,7 +54,8 @@ delete_pods() {
     
     for pod in ${pods}; do
         log_info "Deleting pod: ${pod}"
-        kubectl delete pod "${pod}" -n "${APP_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
+        kubectl delete pod "${pod}" -n "${APP_NAMESPACE}" --timeout=60s --wait=true 2>/dev/null || \
+          kubectl delete pod "${pod}" -n "${APP_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
     done
 }
 

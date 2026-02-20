@@ -9,34 +9,27 @@ set -euo pipefail
 K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 POLICY_NAME="${POLICY_NAME:-postgres-backup-policy}"
+POLICY_FILE="${POLICY_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd ../../manifests/app/postgres && pwd)/backup-policy.yaml}"
 
 echo "[INFO] Creating backup policy..."
 
 # Delete existing policy if present
 kubectl delete policy "${POLICY_NAME}" -n "${K10_NAMESPACE}" 2>/dev/null || true
 
-# Create policy
-# NOTE: Kasten K10 policies select applications by namespace, not by label selector
-# The selector.matchExpressions with k10.kasten.io/appNamespace is the correct way
-# to target a specific namespace for backup
-cat <<EOF | kubectl apply -f -
-apiVersion: config.kio.kasten.io/v1alpha1
-kind: Policy
-metadata:
-  name: ${POLICY_NAME}
-  namespace: ${K10_NAMESPACE}
-spec:
-  comment: "Backup policy for ${APP_NAMESPACE}"
-  frequency: "@onDemand"
-  actions:
-    - action: backup
-  selector:
-    matchExpressions:
-      - key: k10.kasten.io/appNamespace
-        operator: In
-        values:
-          - ${APP_NAMESPACE}
-EOF
+# Create policy from canonical YAML file
+# Allow overriding via POLICY_FILE env, defaulting to manifests/app/postgres/backup-policy.yaml
+if [[ ! -f "${POLICY_FILE}" ]]; then
+  echo "[ERROR] Policy file not found: ${POLICY_FILE}" >&2
+  exit 1
+fi
+
+# If APP_NAMESPACE or K10_NAMESPACE differ from defaults, allow envsubst templating when placeholders exist
+# The canonical file can be plain YAML or a template using ${APP_NAMESPACE} and ${K10_NAMESPACE}
+if grep -q '\${APP_NAMESPACE}\|\${K10_NAMESPACE}' "${POLICY_FILE}" 2>/dev/null; then
+  APP_NAMESPACE="${APP_NAMESPACE}" K10_NAMESPACE="${K10_NAMESPACE}" envsubst < "${POLICY_FILE}" | kubectl apply -f -
+else
+  kubectl apply -f "${POLICY_FILE}"
+fi
 
 echo "[INFO] Policy created!"
 kubectl get policy "${POLICY_NAME}" -n "${K10_NAMESPACE}"

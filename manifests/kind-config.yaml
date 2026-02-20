@@ -12,14 +12,7 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "ingress-ready=true"
-    extraPortMappings:
-      # K10 dashboard access
-      - containerPort: 80
-        hostPort: 8080
-        protocol: TCP
-      - containerPort: 443
-        hostPort: 8443
-        protocol: TCP
+    # extraPortMappings removed to avoid port conflicts; use kubectl port-forward as needed
   # Worker nodes for workload distribution
   - role: worker
   - role: worker
