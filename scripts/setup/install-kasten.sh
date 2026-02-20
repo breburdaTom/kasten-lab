@@ -41,25 +41,82 @@ until [ "$TRIES" -ge 10 ]; do
   sleep 10
 done
 
-# Wait for all deployments to finish rolling out
-DEPLOYMENTS=$(kubectl -n "${K10_NAMESPACE}" get deploy -l app.kubernetes.io/instance=k10 -o name 2>/dev/null || true)
-if [ -n "$DEPLOYMENTS" ]; then
-  echo "[INFO] Waiting for deployments to roll out..."
-  for d in $DEPLOYMENTS; do
-    echo "[INFO] -> $(basename "$d")"
-    kubectl -n "${K10_NAMESPACE}" rollout status "$d" --timeout=10m
-  done
-else
-  echo "[WARN] No K10 deployments found to wait on."
-fi
+# Replace serial rollout with bounded readiness polling that surfaces blockers
+TOTAL_TIMEOUT_SEC=${KASTEN_READY_TIMEOUT:-600}
+INTERVAL_SEC=5
+DIAG_INTERVAL_SEC=20
+ELAPSED=0
+LAST_DIAG=0
 
-# Also wait for pods with the instance label to be Ready (defensive)
-set +e
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=k10 -n "${K10_NAMESPACE}" --timeout=10m
-WAIT_RC=$?
-set -e
-if [ $WAIT_RC -ne 0 ]; then
-  echo "[WARN] Not all K10 pods reported Ready within timeout; proceeding since deployments rolled out."
+echo "[INFO] Monitoring K10 pod readiness (timeout: ${TOTAL_TIMEOUT_SEC}s)..."
+
+while [ ${ELAPSED} -lt ${TOTAL_TIMEOUT_SEC} ]; do
+  # Get counts
+  TOTAL=$(kubectl -n "${K10_NAMESPACE}" get pods -l app.kubernetes.io/instance=k10 --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  READY=$(kubectl -n "${K10_NAMESPACE}" get pods -l app.kubernetes.io/instance=k10 \
+            -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.ready}{"\n"}{end}{end}' 2>/dev/null | \
+          awk 'NF{c+=($1=="true");t++}END{if(t>0)print (c==t?1:0); else print 0}')
+
+  # Fallback Ready count via kubectl wait-like approach
+  READY_PODS=$(kubectl -n "${K10_NAMESPACE}" get pods -l app.kubernetes.io/instance=k10 \
+                -o jsonpath='{range .items[*]}{.metadata.name} {range .status.containerStatuses[*]}{.ready}{" "}{end}{"\n"}{end}' 2>/dev/null | \
+              awk '{ok=1; for(i=2;i<=NF;i++) if($i!="true") ok=0; if(ok) r++} END{print r+0}')
+
+  if [ -z "${TOTAL}" ] || [ "${TOTAL}" -eq 0 ]; then
+    STATUS_MSG="No K10 pods yet"
+  else
+    STATUS_MSG="${READY_PODS}/${TOTAL} pods Ready"
+  fi
+
+  # Periodic diagnostics
+  if [ $((ELAPSED - LAST_DIAG)) -ge ${DIAG_INTERVAL_SEC} ]; then
+    echo "[INFO] ${STATUS_MSG} (t=${ELAPSED}s)"
+    # Show brief info for non-ready pods
+    kubectl -n "${K10_NAMESPACE}" get pods -l app.kubernetes.io/instance=k10 -o wide 2>/dev/null || true
+    NONREADY=$(kubectl -n "${K10_NAMESPACE}" get pods -l app.kubernetes.io/instance=k10 \
+                -o jsonpath='{range .items[*]}{.metadata.name} {range .status.containerStatuses[*]}{.ready}{" "}{end}{"\n"}{end}' 2>/dev/null | \
+              awk '{ok=1; for(i=2;i<=NF;i++) if($i!="true") ok=0; if(!ok) print $1}')
+    if [ -n "${NONREADY}" ]; then
+      echo "[INFO] Diagnostics for non-ready pods:"
+      for p in ${NONREADY}; do
+        echo "[INFO] -> ${p}"
+        kubectl -n "${K10_NAMESPACE}" get pod "${p}" -o jsonpath='Phase: {.status.phase}\nRestarts: {range .status.containerStatuses[*]}{.restartCount}{" "}{end}\nStates: {range .status.containerStatuses[*]}{.state}{"\n"}{end}\n' 2>/dev/null || true
+        # If Pending, show PVCs briefly
+        if kubectl -n "${K10_NAMESPACE}" get pod "${p}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q '^Pending
+
+# Annotate VolumeSnapshotClass for Kasten (in case CSI driver script didn't run)
+kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
+    k10.kasten.io/is-snapshot-class=true --overwrite 2>/dev/null || true
+
+echo "[INFO] Kasten K10 installation complete!"
+echo ""
+echo "Access dashboard: kubectl -n ${K10_NAMESPACE} port-forward svc/gateway 8080:8000"
+echo "Get token: kubectl -n ${K10_NAMESPACE} create token k10-k10 --duration=24h"
+; then
+          echo "[INFO] PVCs in namespace ${K10_NAMESPACE}:"
+          kubectl -n "${K10_NAMESPACE}" get pvc || true
+        fi
+      done
+    fi
+    LAST_DIAG=${ELAPSED}
+  fi
+
+  # Exit success when all pods Ready
+  if [ -n "${TOTAL}" ] && [ "${TOTAL}" -gt 0 ] && [ "${READY_PODS}" = "${TOTAL}" ]; then
+    echo "[INFO] All K10 pods are Ready (${TOTAL}/${TOTAL})."
+    break
+  fi
+
+  sleep ${INTERVAL_SEC}
+  ELAPSED=$((ELAPSED + INTERVAL_SEC))
+done
+
+if [ ${ELAPSED} -ge ${TOTAL_TIMEOUT_SEC} ]; then
+  echo "[ERROR] K10 pods did not become Ready within ${TOTAL_TIMEOUT_SEC}s. Showing final diagnostics..." >&2
+  kubectl -n "${K10_NAMESPACE}" get pods -o wide || true
+  echo "[INFO] Recent K10 events:"
+  kubectl -n "${K10_NAMESPACE}" get events --sort-by=.lastTimestamp | tail -50 || true
+  exit 1
 fi
 
 # Annotate VolumeSnapshotClass for Kasten (in case CSI driver script didn't run)
