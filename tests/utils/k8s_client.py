@@ -112,19 +112,61 @@ class K8sClient:
         namespace: str, 
         label_selector: Optional[str] = None
     ) -> bool:
-        """Check if all pods in namespace are running and ready."""
+        """Check if all relevant pods in namespace are running and ready, with diagnostics.
+        
+        - Ignores Job pods that are Succeeded/Failed (terminal) as they are not long-running services.
+        - Requires phase Running and all containers ready for controller-managed pods.
+        - Logs a concise readiness summary and blockers when not yet ready.
+        """
         pods = self.get_pods(namespace, label_selector)
         if not pods:
+            logger.debug(f"[are_all_pods_ready] No pods found in ns={namespace}")
             return False
-        
+
+        def is_job_pod(p: client.V1Pod) -> bool:
+            owners = (p.metadata.owner_references or [])
+            return any(getattr(o, "kind", "") == "Job" for o in owners)
+
+        total = 0
+        ready_like = 0
+        blockers = []
+
         for pod in pods:
-            if pod.status.phase != "Running":
-                return False
-            if pod.status.container_statuses:
-                for cs in pod.status.container_statuses:
-                    if not cs.ready:
-                        return False
-        return True
+            phase = pod.status.phase or ""
+            name = pod.metadata.name
+
+            # Skip terminal Job pods (from hooks or init tasks)
+            if is_job_pod(pod) and phase in ("Succeeded", "Failed"):
+                continue
+
+            total += 1
+
+            statuses = pod.status.container_statuses or []
+            all_ready = bool(statuses) and all(cs.ready for cs in statuses)
+
+            if phase == "Running" and all_ready:
+                ready_like += 1
+            else:
+                # collect blocker info
+                ready_cnt = sum(1 for cs in statuses if getattr(cs, "ready", False))
+                blockers.append({
+                    "name": name,
+                    "phase": phase,
+                    "ready": f"{ready_cnt}/{len(statuses)}",
+                })
+
+        if total == 0:
+            logger.debug(f"[are_all_pods_ready] No relevant pods (non-terminal Jobs) in ns={namespace}")
+            return False
+
+        if ready_like == total:
+            logger.info(f"[are_all_pods_ready] Ready {ready_like}/{total} pods in ns={namespace}")
+            return True
+
+        # Not ready yet; log concise blockers
+        summary = ", ".join([f"{b['name']}({b['phase']} {b['ready']})" for b in blockers])
+        logger.info(f"[are_all_pods_ready] Waiting: ready {ready_like}/{total}; blockers: {summary}")
+        return False
     
     # =========================================================================
     # StatefulSet Operations
@@ -311,7 +353,8 @@ class K8sClient:
                 logger.debug(f"Condition check failed: {e}")
             
             elapsed = int(time.time() - start_time)
-            logger.info(f"Waiting for {description}... ({elapsed}s/{timeout}s)")
+            remaining = timeout - elapsed
+            logger.info(f"Waiting for {description}... elapsed={elapsed}s remaining={remaining}s interval={interval}s")
             time.sleep(interval)
         
         logger.error(f"Timeout waiting for {description}")
