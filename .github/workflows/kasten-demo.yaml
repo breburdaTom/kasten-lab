@@ -85,15 +85,15 @@ jobs:
           chmod +x scripts/setup/install-kind.sh
           ./scripts/setup/install-kind.sh
 
-      - name: "💾 Install CSI Hostpath Driver"
-        run: |
-          chmod +x scripts/setup/install-csi-driver.sh
-          ./scripts/setup/install-csi-driver.sh
-
       - name: "📸 Install Snapshot Controller"
         run: |
           chmod +x scripts/setup/install-snapshot-controller.sh
           ./scripts/setup/install-snapshot-controller.sh
+
+      - name: "💾 Install CSI Hostpath Driver"
+        run: |
+          chmod +x scripts/setup/install-csi-driver.sh
+          ./scripts/setup/install-csi-driver.sh
 
       - name: Verify cluster setup
         run: |
