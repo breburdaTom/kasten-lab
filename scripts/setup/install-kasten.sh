@@ -26,10 +26,41 @@ helm upgrade --install k10 kasten/k10 \
     --set auth.tokenAuth.enabled=true \
     --set global.persistence.storageClass=csi-hostpath-sc
 
-# Wait for pods
-echo "[INFO] Waiting for K10 pods..."
-kubectl wait --for=condition=ready pod -l app=k10 -n "${K10_NAMESPACE}" --timeout=600s 2>/dev/null || \
-sleep 60  # Fallback wait
+th# Wait for K10 resources to become ready using stable Helm labels and rollout status
+echo "[INFO] Waiting for K10 resources to become ready..."
+
+# Ensure some pods are created before waiting (up to 10 tries with 10s interval)
+TRIES=0
+until [ "$TRIES" -ge 10 ]; do
+  POD_COUNT=$(kubectl -n "${K10_NAMESPACE}" get pods -l app.kubernetes.io/instance=k10 --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$POD_COUNT" -gt 0 ]; then
+    break
+  fi
+  TRIES=$((TRIES+1))
+  echo "[INFO] Waiting for K10 pods to be created (attempt ${TRIES}/10)..."
+  sleep 10
+done
+
+# Wait for all deployments to finish rolling out
+DEPLOYMENTS=$(kubectl -n "${K10_NAMESPACE}" get deploy -l app.kubernetes.io/instance=k10 -o name 2>/dev/null || true)
+if [ -n "$DEPLOYMENTS" ]; then
+  echo "[INFO] Waiting for deployments to roll out..."
+  for d in $DEPLOYMENTS; do
+    echo "[INFO] -> $(basename "$d")"
+    kubectl -n "${K10_NAMESPACE}" rollout status "$d" --timeout=10m
+  done
+else
+  echo "[WARN] No K10 deployments found to wait on."
+fi
+
+# Also wait for pods with the instance label to be Ready (defensive)
+set +e
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=k10 -n "${K10_NAMESPACE}" --timeout=10m
+WAIT_RC=$?
+set -e
+if [ $WAIT_RC -ne 0 ]; then
+  echo "[WARN] Not all K10 pods reported Ready within timeout; proceeding since deployments rolled out."
+fi
 
 # Annotate VolumeSnapshotClass for Kasten (in case CSI driver script didn't run)
 kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
