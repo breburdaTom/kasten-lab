@@ -23,53 +23,13 @@ deploy_dir=$(ls -d deploy/kubernetes-* 2>/dev/null | sort -V | tail -1)
 echo "[INFO] Using deploy directory: ${deploy_dir}"
 ./${deploy_dir}/deploy.sh
 
-# Apply StorageClass and make it default
+# Apply declarative StorageClass manifest (sets default via annotation)
 echo "[INFO] Setting up StorageClass..."
-kubectl apply -f examples/csi-storageclass.yaml
-kubectl patch storageclass standard \
-    -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' 2>/dev/null || true
-kubectl patch storageclass csi-hostpath-sc \
-    -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+kubectl apply -f "${PROJECT_ROOT}/manifests/cluster/csi/storageclass.yaml"
 
-# Apply VolumeSnapshotClass with Retain policy
-# CRITICAL: The default CSI examples use Delete policy which causes snapshot data
-# to be deleted when PVCs are deleted, making restore impossible
-echo "[INFO] Setting up VolumeSnapshotClass with Retain policy..."
-cat <<EOF | kubectl apply -f -
-apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshotClass
-metadata:
-  name: csi-hostpath-snapclass
-  annotations:
-    # Mark as default VolumeSnapshotClass for the cluster
-    snapshot.storage.kubernetes.io/is-default-class: "true"
-    # Mark as the snapshot class for Kasten K10
-    k10.kasten.io/is-snapshot-class: "true"
-  labels:
-    # Enable clone operations for Kasten restore
-    k10.kasten.io/isCloneClass: "true"
-driver: hostpath.csi.k8s.io
-deletionPolicy: Retain
-EOF
-
-# Also create the Kasten clone snapshot class with Retain policy
-# Kasten creates this automatically but with Delete policy by default
-echo "[INFO] Creating Kasten clone snapshot class with Retain policy..."
-cat <<EOF | kubectl apply -f -
-apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshotClass
-metadata:
-  name: k10-clone-csi-hostpath-snapclass
-  labels:
-    k10.kasten.io/isCloneClass: "true"
-driver: hostpath.csi.k8s.io
-deletionPolicy: Retain
-EOF
-
-# Annotate StorageClass for Kasten
-echo "[INFO] Configuring StorageClass for Kasten K10..."
-kubectl annotate storageclass csi-hostpath-sc \
-    k10.kasten.io/volume-snapshot-class=csi-hostpath-snapclass --overwrite
+# Apply declarative VolumeSnapshotClass manifests
+kubectl apply -f "${PROJECT_ROOT}/manifests/cluster/csi/volumesnapshotclass-default.yaml"
+# Ensure StorageClass annotation is already in YAML; no imperative annotation needed
 
 # Cleanup
 cd "${PROJECT_ROOT}"

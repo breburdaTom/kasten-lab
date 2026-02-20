@@ -1,0 +1,16 @@
+# Kasten K10 Backup Policy for PostgreSQL demo
+# This policy uses CSI snapshots (no export profile needed for local snapshots)
+---
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: postgres-backup-policy
+  namespace: kasten-io
+spec:
+  comment: "Backup policy for PostgreSQL demo - uses CSI snapshots"
+  frequency: "@onDemand"
+  actions:
+    - action: backup
+  selector:
+    matchLabels:
+      k10.kasten.io/appNamespace: test-app

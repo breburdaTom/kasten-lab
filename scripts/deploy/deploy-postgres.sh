@@ -13,7 +13,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/../lib/common.sh"
 
 APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
-POSTGRES_MANIFEST="${PROJECT_ROOT}/manifests/postgres.yaml"
+POSTGRES_DIR="${PROJECT_ROOT}/manifests/app/postgres"
 READY_TIMEOUT="${APP_READY_TIMEOUT:-300}"
 
 create_namespace() {
@@ -24,15 +24,17 @@ create_namespace() {
 }
 
 deploy_postgres() {
-    log_info "Deploying PostgreSQL StatefulSet..."
-    
-    if [[ ! -f "${POSTGRES_MANIFEST}" ]]; then
-        log_error "PostgreSQL manifest not found: ${POSTGRES_MANIFEST}"
+    log_info "Deploying PostgreSQL manifests..."
+
+    if [[ ! -d "${POSTGRES_DIR}" ]]; then
+        log_error "PostgreSQL manifests directory not found: ${POSTGRES_DIR}"
         exit 1
     fi
-    
-    kubectl apply -f "${POSTGRES_MANIFEST}"
-    log_info "PostgreSQL StatefulSet deployed"
+
+    kubectl apply -f "${POSTGRES_DIR}/namespace.yaml"
+    kubectl apply -f "${POSTGRES_DIR}/service.yaml"
+    kubectl apply -f "${POSTGRES_DIR}/statefulset.yaml"
+    log_info "PostgreSQL manifests applied"
 }
 
 wait_for_postgres_ready() {
