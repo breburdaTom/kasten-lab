@@ -26,7 +26,7 @@ helm upgrade --install k10 kasten/k10 \
     --set auth.tokenAuth.enabled=true \
     --set global.persistence.storageClass=csi-hostpath-sc
 
-th# Wait for K10 resources to become ready using stable Helm labels and rollout status
+# Wait for K10 resources to become ready using stable Helm labels and rollout status
 echo "[INFO] Waiting for K10 resources to become ready..."
 
 # Ensure some pods are created before waiting (up to 10 tries with 10s interval)
