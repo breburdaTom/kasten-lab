@@ -84,7 +84,7 @@ while [ ${ELAPSED} -lt ${TOTAL_TIMEOUT_SEC} ]; do
         # If Pending, show PVCs briefly
         if kubectl -n "${K10_NAMESPACE}" get pod "${p}" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q '^Pending
 
-# Annotate VolumeSnapshotClass for Kasten (in case CSI driver script didn't run)
+# Annotate VolumeSnapshotClass for Kasten (in case CSI driver script did not run)
 kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
     k10.kasten.io/is-snapshot-class=true --overwrite 2>/dev/null || true
 

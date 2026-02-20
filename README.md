@@ -15,50 +15,38 @@ Automated demo of Veeam Kasten K10 backup and restore on Kubernetes. Runs as a G
 ## Project structure
 
 ```
-scripts/
-├── lib/common.sh              # Shared functions (logging, wait helpers)
-├── setup/                     # Cluster and K10 installation
-├── deploy/                    # PostgreSQL deployment and data seeding
-├── backup/                    # Policy creation and backup trigger
-└── restore/                   # App destruction and restore
-
-tests/
-├── test_01_cluster_health.py
-├── test_02_kasten_health.py
-├── test_03_app_deployment.py
-├── test_04_backup_verification.py
-└── test_05_restore_verification.py
-
-manifests/
-├── kind-config.yaml
-├── postgres.yaml
-└── k10-clone-snapshotclass.yaml
+scripts/        # automation scripts (setup, deploy, backup, restore, lib)
+manifests/      # Kubernetes manifests (app, cluster, kind-config, postgres)
+reports/        # generated artifacts
+tests/          # pytest suite and helpers
 ```
 
 ## Running locally
 
 ```bash
-# Setup
+# Prereqs: Docker installed; Python 3.10+ available for tests
+
+# Setup cluster and Kasten
 ./scripts/setup/install-kind.sh
 ./scripts/setup/install-snapshot-controller.sh
 ./scripts/setup/install-csi-driver.sh
 ./scripts/setup/install-kasten.sh
 
-# Deploy app
+# Deploy app (PostgreSQL) and seed test data
 ./scripts/deploy/deploy-postgres.sh
 ./scripts/deploy/seed-data.sh
 
-# Backup
+# Create backup policy and trigger a run
 ./scripts/backup/create-policy.sh
 ./scripts/backup/trigger-backup.sh
 
-# Destroy and restore
+# Simulate disaster and restore from backup
 ./scripts/restore/destroy-app.sh
 ./scripts/restore/restore-app.sh
 
 # Run tests
 pip install -r requirements.txt
-pytest tests/ -v
+pytest -v
 ```
 
 ## Environment variables
