@@ -7,4 +7,4 @@ metadata:
 provisioner: hostpath.csi.k8s.io
 reclaimPolicy: Delete
 allowVolumeExpansion: true
-volumeBindingMode: WaitForFirstConsumer
+volumeBindingMode: Immediate
