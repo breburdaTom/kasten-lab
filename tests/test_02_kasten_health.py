@@ -7,6 +7,8 @@ Verifies that Kasten K10 is properly installed and healthy.
 import pytest
 import logging
 
+from kubernetes import client
+
 from tests.utils.k8s_client import K8sClient
 from tests.utils.kasten_client import KastenClient
 
@@ -205,8 +207,6 @@ class TestKastenServices:
         k10_namespace: str
     ):
         """Verify gateway service exists for dashboard access."""
-        from kubernetes import client
-        
         core_v1 = client.CoreV1Api()
         
         try:
@@ -225,8 +225,6 @@ class TestKastenServices:
         k10_namespace: str
     ):
         """Verify expected number of K10 services."""
-        from kubernetes import client
-        
         core_v1 = client.CoreV1Api()
         services = core_v1.list_namespaced_service(k10_namespace)
         
@@ -243,8 +241,6 @@ class TestKastenVolumeSnapshotIntegration:
     
     def test_snapshot_class_annotated_for_kasten(self, k8s_client: K8sClient):
         """Verify VolumeSnapshotClass is annotated for Kasten."""
-        from kubernetes import client
-        
         custom_objects = client.CustomObjectsApi()
         
         result = custom_objects.list_cluster_custom_object(

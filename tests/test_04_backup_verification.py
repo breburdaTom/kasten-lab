@@ -7,6 +7,8 @@ Verifies that Kasten K10 backup operations complete successfully.
 import pytest
 import logging
 
+from kubernetes import client
+
 from tests.utils.k8s_client import K8sClient
 from tests.utils.kasten_client import KastenClient
 
@@ -242,8 +244,6 @@ class TestBackupArtifacts:
         app_namespace: str
     ):
         """Verify VolumeSnapshot was created for the PVC."""
-        from kubernetes import client
-        
         custom_objects = client.CustomObjectsApi()
         
         try:

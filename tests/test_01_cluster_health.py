@@ -7,6 +7,8 @@ Verifies that the Kind cluster and infrastructure components are healthy.
 import pytest
 import logging
 
+from kubernetes import client
+
 from tests.utils.k8s_client import K8sClient
 
 logger = logging.getLogger(__name__)
@@ -100,8 +102,6 @@ class TestCSIDriver:
     
     def test_csi_driver_registered(self, k8s_client: K8sClient):
         """Verify CSI driver is registered with Kubernetes."""
-        from kubernetes import client
-        
         storage_v1 = client.StorageV1Api()
         csi_drivers = storage_v1.list_csi_driver()
         driver_names = [d.metadata.name for d in csi_drivers.items]
@@ -147,8 +147,6 @@ class TestSnapshotController:
     
     def test_volume_snapshot_class_exists(self, k8s_client: K8sClient):
         """Verify VolumeSnapshotClass exists for CSI driver."""
-        from kubernetes import client
-        
         custom_objects = client.CustomObjectsApi()
         
         try:
