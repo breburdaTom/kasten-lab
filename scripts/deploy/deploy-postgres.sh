@@ -16,13 +16,6 @@ APP_NAMESPACE="${APP_NAMESPACE:-test-app}"
 POSTGRES_DIR="${PROJECT_ROOT}/manifests/app/postgres"
 READY_TIMEOUT="${APP_READY_TIMEOUT:-300}"
 
-create_namespace() {
-    log_info "Creating namespace '${APP_NAMESPACE}'..."
-    kubectl create namespace "${APP_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-    kubectl label namespace "${APP_NAMESPACE}" app=postgres environment=demo --overwrite
-    log_info "Namespace created and labeled"
-}
-
 deploy_postgres() {
     log_info "Deploying PostgreSQL manifests..."
 
@@ -79,7 +72,6 @@ verify_deployment() {
 
 main() {
     log_info "Starting PostgreSQL deployment..."
-    create_namespace
     deploy_postgres
     wait_for_postgres_ready
     verify_deployment

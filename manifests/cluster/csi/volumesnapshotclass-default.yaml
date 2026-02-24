@@ -4,7 +4,11 @@ metadata:
   name: csi-hostpath-snapclass
   annotations:
     snapshot.storage.kubernetes.io/is-default-class: "true"
+    k10.kasten.io/is-snapshot-class: "true"
   labels:
     k10.kasten.io/isCloneClass: "true"
 driver: hostpath.csi.k8s.io
+# CRITICAL: Must be Retain to preserve snapshots after PVC/namespace deletion.
+# With Delete policy, destroying the app namespace deletes the snapshot data,
+# making restore impossible even though RestorePoints still exist.
 deletionPolicy: Retain

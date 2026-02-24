@@ -103,10 +103,6 @@ if [ ${ELAPSED} -ge ${TOTAL_TIMEOUT_SEC} ]; then
   exit 1
 fi
 
-# Annotate VolumeSnapshotClass for Kasten (in case CSI driver script didn't run)
-kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
-    k10.kasten.io/is-snapshot-class=true --overwrite 2>/dev/null || true
-
 echo "[INFO] Kasten K10 installation complete!"
 echo ""
 echo "Access dashboard: kubectl -n ${K10_NAMESPACE} port-forward svc/gateway 8080:8000"
